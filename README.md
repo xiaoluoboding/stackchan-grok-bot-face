@@ -1,32 +1,51 @@
-# StackChan Open-Source
+# StackChan Grok Bot Face
 
-<img src="https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1205/K151_stack_chan_main_pictures_01.webp" width="60%">
+基于 [M5Stack StackChan](https://github.com/m5stack/StackChan) 的固件定制版：在机器人屏幕上播放 Grok Bot 表情，保留语音对话，并针对实际设备上的联网、音频播放和待机动作做了调整。仓库同时包含上游的手机应用、服务端和 ESP-NOW 遥控器源码。
 
-Here are StackChan related open-source resources, including source code of the StackChan firmware, remote controller firmware, mobile app (iOS and Android), and server. 
+> 本项目与 M5Stack 官方固件、Grok Bot 原作者均无隶属关系。Grok Bot 动画来源及权利说明见 [第三方说明](third_party/grokbot/README.md)。
 
-Update of this repo could be a little late than the released firmware and mobile app. 
+## 当前固件支持什么
 
-----
+| 功能 | 当前行为 |
+| --- | --- |
+| 语音唤醒与对话 | 对机器人说 **“你好小智”** 唤醒；使用 ESP-SR 的 WakeNet9l 模型在设备端识别唤醒词。后续对话需要 Wi-Fi、可用的语音服务以及设备激活。 |
+| Grok Bot 表情 | 53 组预制动画对应待机、聆听、说话、连接状态和 AI 情绪；表情资源损坏或缺失时回退到原有头像。屏幕表情动画与实体头部运动独立。 |
+| 待机头部 | 默认关闭周期性随机摆头。升级已有配置的设备首次启动时也会将旧的闲置动作设置改为关闭；以后仍可在设备设置中手动开启。触摸和主动控制头部的能力保留。 |
+| Wi-Fi 与语音连接 | 同名热点优先连接扫描到的较强接入点，并在语音运行时保持高性能 Wi-Fi 模式；保留 MQTT/TLS 连接和服务端激活流程。 |
+| 音频播放 | 调整音频任务、缓冲和屏幕动画的资源分配，减少播放卡顿。聆听和说话时降低表情帧率，为语音留出处理时间。 |
+| 固件更新 | 启动时仍向配置服务获取连接参数，并完成必要的激活流程；**不在启动时比较版本、自动下载固件或循环重试失败的配置请求**。设备设置中的手动更新入口仍可使用。 |
 
-<img src="https://cdn.shopify.com/s/files/1/0056/7689/2250/files/5a589623895f65487717894d9240f6b8.png" width="60%">
+这些行为已在一台 M5Stack StackChan（ESP32-S3、16 MB Flash、8 MB PSRAM）上验证：设备连接 Wi-Fi 和语音服务后，能够用“你好小智”唤醒并正常回复，待机时头部不再自动摆动。不同网络和设备上的效果仍应自行验证。
 
-**StackChan is a super kawaii AI desktop robot co-created by M5Stack and the user community.** It uses the M5Stack **flagship IoT development kit [CoreS3](https://docs.m5stack.com/en/core/CoreS3)** as its main controller, powered by an ESP32-S3 SoC featuring a 240 MHz dual-core processor, with 16MB Flash and 8MB PSRAM onboard, and supporting Wi-Fi and BLE. The main unit also integrates a 2.0-inch capacitive touch display with a high-strength glass cover, a 0.3 MP camera, a proximity & ambient light sensor, a 9-axis IMU (accelerometer + gyroscope + magnetometer), a microSD card slot, a 1W speaker, dual microphones, and power/reset buttons. 
+## 仓库内容
 
-The **robot body**, connected to the main unit, includes a USB-C interface for power and data, a 550 mAh battery, two feedback servos (360-degree continuous rotation on the horizontal axis and 90-degree movement on the vertical axis), two rows totaling 12 RGB LEDs, infrared transmitter and receiver, a three-zone touch panel, and a full-featured NFC module. 
+| 目录 | 内容 | 文档 |
+| --- | --- | --- |
+| firmware/ | ESP-IDF 固件、Grok Bot 表情资源、构建配置与硬件驱动；本项目的主要改动集中在这里 | [固件说明](firmware/README.md) |
+| tools/grokbot/、third_party/grokbot/ | 表情资源生成工具与所需的第三方动画数据 | [资源说明](third_party/grokbot/README.md) |
+| app/ | 上游 Flutter 手机应用源码 | [应用说明](app/README.md) |
+| server/ | 上游 Go 服务端源码 | [服务端说明](server/README.MD) |
+| remote/ | ESP-NOW 遥控器源码 | [遥控器说明](remote/README.md) |
 
-The **factory firmware** is feature-rich, including an AI Agent, lively and expressive animations, ESP-NOW wireless remote control, and online app downloads. It can connect to a mobile app for video viewing, remote avatar control, and more, and also supports online updates (OTA). The product also supports programming via Arduino, UiFlow2, and other methods, and can connect to various expansion units in the M5Stack ecosystem, making it easy to implement a wide range of custom functions. 
+手机应用、服务端和遥控器源码随仓库提供；本次硬件验证主要覆盖固件的唤醒、对话、表情和待机行为，并不代表这些模块的全部功能都已重新做过端到端测试。
 
-> ⚠️ Do not forcibly rotate any movable parts connected to the motors by hand when you are unsure whether the motors are powered and under control, as this may cause hardware damage. 
+原有固件中的触摸屏、摄像头、RGB 灯、头部舵机、ESP-NOW 等功能代码仍在仓库中；其中部分功能需要对应的应用、服务端或遥控器配合。
 
-- Purchase link: [M5Stack Official Store](https://shop.m5stack.com/products/stackchan-kawaii-co-created-open-source-ai-desktop-robot) | [淘宝 Taobao](https://item.taobao.com/item.htm?id=1042238294510)
+## 编译和刷机
 
-- Product document page: [English](https://docs.m5stack.com/en/StackChan) | [日本語](https://docs.m5stack.com/ja/StackChan) | [中文](https://docs.m5stack.com/zh_CN/StackChan)
+需要 [ESP-IDF v6.1](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32s3/index.html)、Python 3 和一台兼容的 StackChan。先激活 ESP-IDF 环境，然后在仓库根目录执行：
 
-- Board support package: https://github.com/m5stack/StackChan-BSP
+~~~bash
+cd firmware
+python3 fetch_repos.py
+idf.py build
+idf.py -p PORT flash
+~~~
 
-Thank you to the contributors of the StackChan community, especially: 
+fetch_repos.py 会拉取固定版本的依赖并应用本仓库的补丁；固件构建会同时生成应用和 assets 分区镜像。普通 flash 会保留 NVS 中的 Wi-Fi 与设备配置；不要为日常升级使用 erase-flash。详细说明和表情资源重建方法见 [固件说明](firmware/README.md)。
 
-| ![](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1205/avatar_stack_chan.jpg) | ![](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1205/avatar_takao.jpg) |
-| -------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| [@stack_chan](https://x.com/stack_chan)                                          | [@mongonta555](https://x.com/mongonta555)                                   |
-| Shinya Ishikawa                                                                  | Takao Akaki                                                                 |
+若使用自己的 StackChan 服务端或语音配置服务，可在 firmware/ 下创建不提交到 Git 的 sdkconfig.defaults.local，覆盖 CONFIG_STACKCHAN_SERVER_URL、CONFIG_OTA_URL 等配置。配置服务必须提供语音连接参数；关闭自动固件更新不等于设备可以离线完成首次激活。
+
+## 来源与许可
+
+固件、应用、服务端和遥控器基于上游项目；各子目录中的许可证与第三方声明分别适用。Grok Bot 名称、形象及动画数据的来源见 [第三方说明](third_party/grokbot/README.md)。
