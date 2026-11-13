@@ -1,0 +1,13 @@
+diff --git a/src/debug/src/sdcard/sdcard.c b/src/debug/src/sdcard/sdcard.c
+index f1af44a..3b27fa2 100644
+--- a/src/debug/src/sdcard/sdcard.c
++++ b/src/debug/src/sdcard/sdcard.c
+@@ -30,6 +30,8 @@
+ #include "espnow_utils.h"
+ #include "sdcard.h"
+ 
++#include <time.h>
++
+ static const char *TAG = "sdcard";
+ 
+ #define SDCARD_BASE_PATH "/sdcard"
