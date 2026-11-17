@@ -1,5 +1,5 @@
 diff --git a/main/application.cc b/main/application.cc
-index 31de205..f12a759 100644
+index 31de205..da9a598 100644
 --- a/main/application.cc
 +++ b/main/application.cc
 @@ -1,4 +1,5 @@
@@ -172,11 +172,69 @@ index 31de205..f12a759 100644
              SetDeviceState(kDeviceStateIdle);
              return;
          }
+@@ -1264,6 +1297,33 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
+     }
+ }
+ 
++void Application::SendChatText(const std::string& text) {
++    if (!protocol_ || GetDeviceState() != kDeviceStateIdle) {
++        ESP_LOGW(TAG, "USB chat unavailable or busy");
++        return;
++    }
++    if (!protocol_->IsAudioChannelOpened() && !protocol_->OpenAudioChannel()) {
++        ESP_LOGW(TAG, "USB chat channel failed");
++        return;
++    }
++    // The MQTT service needs an outbound UDP packet to learn the NAT return path.
++    // Prime it with 60 ms of Opus silence, without opening the microphone.
++    if (dynamic_cast<MqttProtocol*>(protocol_.get())) {
++        auto silence = std::make_unique<AudioStreamPacket>();
++        silence->payload = {0xbb, 0x03, 0xff, 0xfe, 0xff, 0xfe, 0xff, 0xfe};
++        if (!protocol_->SendAudio(std::move(silence))) {
++            ESP_LOGW(TAG, "USB chat channel failed");
++            protocol_->CloseAudioChannel();
++            return;
++        }
++    }
++    listening_mode_ = kListeningModeManualStop;
++    extern void stackchan_arm_chat_output();
++    stackchan_arm_chat_output();
++    protocol_->SendWakeWordDetected(text);
++    ESP_LOGI(TAG, "USB chat text submitted");
++}
++
+ void Application::WakeWordInvoke(const std::string& wake_word) {
+     if (!protocol_) {
+         return;
 diff --git a/main/application.h b/main/application.h
-index f2b9a00..68f01d1 100644
+index f2b9a00..2528131 100644
 --- a/main/application.h
 +++ b/main/application.h
-@@ -180,7 +180,6 @@ private:
+@@ -109,6 +109,7 @@ public:
+     void StopListening();
+ 
+     void Reboot();
++    void SendChatText(const std::string& text);
+     void WakeWordInvoke(const std::string& wake_word);
+     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
+     bool CanEnterSleepMode();
+@@ -116,6 +117,7 @@ public:
+     void RegisterMcpBroadcastCallback(std::function<void(const std::string&)> callback);
+     void SetAecMode(AecMode mode);
+     AecMode GetAecMode() const { return aec_mode_; }
++    void StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles);
+     void PlaySound(const std::string_view& sound);
+     AudioService& GetAudioService() { return audio_service_; }
+     
+@@ -169,7 +171,6 @@ private:
+     void ContinueWakeWordInvoke(const std::string& wake_word);
+     void StartListeningAudio();
+     void ConfigureWakeWordForListening();
+-    void StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles);
+     void StopNotification();
+     void HandleNotificationFinished(uint32_t playback_id, bool success);
+ 
+@@ -180,7 +181,6 @@ private:
      void CheckAssetsVersion();
      void CheckNewVersion();
      void InitializeProtocol();
@@ -185,7 +243,7 @@ index f2b9a00..68f01d1 100644
      ListeningMode GetDefaultListeningMode() const;
      
 diff --git a/main/audio/audio_service.cc b/main/audio/audio_service.cc
-index 7f7582b..b8b63f5 100644
+index 7f7582b..34de3d6 100644
 --- a/main/audio/audio_service.cc
 +++ b/main/audio/audio_service.cc
 @@ -139,7 +139,7 @@ void AudioService::Start() {
@@ -215,6 +273,32 @@ index 7f7582b..b8b63f5 100644
  }
  
  void AudioService::Stop() {
+@@ -239,6 +239,8 @@ bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, in
+     return true;
+ }
+ 
++extern void stackchan_capture_audio(const int16_t* samples, size_t count, int channels);
++
+ void AudioService::AudioInputTask() {
+     constexpr EventBits_t kAudioInputActiveBits = AS_EVENT_AUDIO_TESTING_RUNNING |
+                                                   AS_EVENT_WAKE_WORD_RUNNING |
+@@ -311,6 +313,7 @@ void AudioService::AudioInputTask() {
+             int samples = 160;  // 10ms
+             std::vector<int16_t> data;
+             if (ReadAudioData(data, 16000, samples)) {
++                stackchan_capture_audio(data.data(), data.size(), codec_->input_channels());
+                 audio_engine_->Feed(std::move(data));
+                 continue;
+             }
+@@ -349,6 +352,8 @@ void AudioService::AudioOutputTask() {
+         }
+ 
+         codec_->OutputData(task.pcm);
++        extern void stackchan_chat_output(const int16_t*, size_t, int);
++        stackchan_chat_output(task.pcm.data(), task.pcm.size(), codec_->output_volume());
+ 
+         /* Update the last output time */
+         last_output_time_ = std::chrono::steady_clock::now();
 diff --git a/main/audio/engines/afe_audio_engine.cc b/main/audio/engines/afe_audio_engine.cc
 index 3823d10..5cfcf79 100644
 --- a/main/audio/engines/afe_audio_engine.cc
@@ -924,3 +1008,64 @@ index c4a6077..93ca32a 100644
  }
  
  void SystemInfo::PrintPmLocks() {
+diff --git a/main/notify/notify_player.cc b/main/notify/notify_player.cc
+index 312bc96..4a8acd8 100644
+--- a/main/notify/notify_player.cc
++++ b/main/notify/notify_player.cc
+@@ -6,6 +6,8 @@
+ #include <memory>
+ 
+ #include <esp_log.h>
++#include <esp_heap_caps.h>
++#include <freertos/idf_additions.h>
+ 
+ #include "board.h"
+ #include "http.h"
+@@ -62,8 +64,9 @@ bool NotifyPlayer::Start(std::string audio_url, std::vector<NotifySubtitle> subt
+         completion_reported_ = false;
+     }
+ 
+-    BaseType_t created = xTaskCreate(WorkerEntry, "notify_http", kNotifyTaskStackSize, this,
+-                                     kNotifyTaskPriority, &task_handle_);
++    BaseType_t created = xTaskCreateWithCaps(WorkerEntry, "notify_http", kNotifyTaskStackSize, this,
++                                             kNotifyTaskPriority, &task_handle_,
++                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+     if (created != pdPASS) {
+         ESP_LOGE(TAG, "Failed to create notification HTTP task");
+         std::lock_guard<std::mutex> lock(mutex_);
+@@ -168,7 +171,7 @@ void NotifyPlayer::OnPlaybackDrained() {
+ void NotifyPlayer::WorkerEntry(void* arg) {
+     auto* player = static_cast<NotifyPlayer*>(arg);
+     player->WorkerTask();
+-    vTaskDelete(nullptr);
++    vTaskDeleteWithCaps(nullptr);
+ }
+ 
+ void NotifyPlayer::WorkerTask() {
+diff --git a/main/protocols/protocol.cc b/main/protocols/protocol.cc
+index ac591b5..279a1f9 100644
+--- a/main/protocols/protocol.cc
++++ b/main/protocols/protocol.cc
+@@ -73,10 +73,18 @@ void Protocol::SendAbortSpeaking(AbortReason reason) {
+ }
+ 
+ void Protocol::SendWakeWordDetected(const std::string& wake_word) {
+-    std::string json = "{\"session_id\":\"" + session_id_ +
+-                       "\",\"type\":\"listen\",\"state\":\"detect\",\"text\":\"" + wake_word +
+-                       "\"}";
+-    SendText(json);
++    auto* payload = cJSON_CreateObject();
++    if (!payload) return;
++    if (cJSON_AddStringToObject(payload, "session_id", session_id_.c_str()) &&
++        cJSON_AddStringToObject(payload, "type", "listen") &&
++        cJSON_AddStringToObject(payload, "state", "detect") &&
++        cJSON_AddStringToObject(payload, "text", wake_word.c_str())) {
++        if (auto* json = cJSON_PrintUnformatted(payload)) {
++            SendText(json);
++            cJSON_free(json);
++        }
++    }
++    cJSON_Delete(payload);
+ }
+ 
+ void Protocol::SendStartListening(ListeningMode mode) {

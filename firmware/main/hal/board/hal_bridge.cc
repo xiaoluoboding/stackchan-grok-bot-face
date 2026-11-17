@@ -7,11 +7,19 @@
 #include "stackchan_display.h"
 #include <esp_log.h>
 #include <esp_err.h>
+#include <esp_heap_caps.h>
+#include <mbedtls/base64.h>
+#include <cstdlib>
+#include <atomic>
+#include <algorithm>
+#include <cstdio>
 #include <nvs.h>
 #include <nvs_flash.h>
 #include <driver/gpio.h>
+#include <driver/usb_serial_jtag.h>
 #include <esp_event.h>
 #include <application.h>
+#include <cJSON.h>
 #include <board.h>
 #include <display.h>
 #include <mutex>
@@ -27,7 +35,156 @@ static constexpr std::string_view _xiaozhi_config_idle_random_movement_key      
 static constexpr std::string_view _xiaozhi_config_idle_motion_disabled_key         = "idle_off_v1";
 static constexpr std::string_view _xiaozhi_config_start_ai_agent_on_boot_key       = "boot_ai";
 
+
+namespace {
+std::mutex capture_mutex;
+int16_t* capture_buffer = nullptr;
+size_t capture_size = 0;
+size_t capture_capacity = 0;
+}
+
+static std::atomic_bool chat_output_pending{false};
+
+void stackchan_arm_chat_output()
+{
+    chat_output_pending = true;
+}
+
+void stackchan_chat_output(const int16_t* samples, size_t count, int volume)
+{
+    if (chat_output_pending.load() &&
+        std::any_of(samples, samples + count, [](int16_t sample) { return sample > 32 || sample < -32; }) &&
+        chat_output_pending.exchange(false)) {
+        ESP_LOGI("USBChat", "Speech audio delivered to speaker, volume=%d", volume);
+    }
+}
+
+void stackchan_capture_audio(const int16_t* samples, size_t count, int channels)
+{
+    std::lock_guard<std::mutex> lock(capture_mutex);
+    for (size_t i = 0; capture_buffer && i < count && capture_size < capture_capacity; i += channels) {
+        capture_buffer[capture_size++] = samples[i];
+    }
+}
+
+static bool usb_write(std::string_view line)
+{
+    return usb_serial_jtag_write_bytes(line.data(), line.size(), pdMS_TO_TICKS(1000)) ==
+           static_cast<int>(line.size());
+}
+
+static void usb_record(int seconds)
+{
+    auto& app = Application::GetInstance();
+    if (app.GetDeviceState() != kDeviceStateIdle) {
+        usb_write("STACKCHAN_RECORD_ERROR busy\n");
+        return;
+    }
+    const size_t capacity = seconds * 16000;
+    auto* audio = static_cast<int16_t*>(heap_caps_malloc(capacity * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    if (!audio) {
+        usb_write("STACKCHAN_RECORD_ERROR memory\n");
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(capture_mutex);
+        capture_size = 0;
+        capture_capacity = capacity;
+        capture_buffer = audio;
+    }
+    usb_write("STACKCHAN_RECORD_START\n");
+
+    const auto deadline = xTaskGetTickCount() + pdMS_TO_TICKS((seconds + 2) * 1000);
+    size_t samples = 0;
+    bool interrupted = false;
+    while (true) {
+        interrupted = app.GetDeviceState() != kDeviceStateIdle;
+        const bool expired = xTaskGetTickCount() >= deadline;
+        {
+            std::lock_guard<std::mutex> lock(capture_mutex);
+            if (interrupted || expired || capture_size == capacity) {
+                samples = capture_size;
+                capture_buffer = nullptr;
+                break;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    if (interrupted || samples != capacity) {
+        usb_write("STACKCHAN_RECORD_ERROR capture interrupted\n");
+    } else {
+        const auto* bytes = reinterpret_cast<const unsigned char*>(audio);
+        const size_t length = samples * sizeof(int16_t);
+        for (size_t offset = 0; offset < length; offset += 120) {
+            unsigned char encoded[161];
+            size_t written = 0;
+            mbedtls_base64_encode(encoded, sizeof(encoded), &written,
+                                  bytes + offset, std::min<size_t>(120, length - offset));
+            char line[180];
+            const auto size = snprintf(line, sizeof(line), "STACKCHAN_PCM %.*s\n",
+                                       static_cast<int>(written), encoded);
+            if (!usb_write({line, static_cast<size_t>(size)})) break;
+        }
+        usb_write("STACKCHAN_RECORD_END\n");
+    }
+    free(audio);
+}
+
 namespace hal_bridge {
+
+static void usb_speech_task(void*)
+{
+    constexpr std::string_view prefix = "STACKCHAN_SAY ";
+    std::string line;
+    bool overflow = false;
+    uint8_t buffer[64];
+    while (true) {
+        const int count = usb_serial_jtag_read_bytes(buffer, sizeof(buffer), pdMS_TO_TICKS(250));
+        for (int i = 0; i < count; ++i) {
+            const char ch = static_cast<char>(buffer[i]);
+            if (ch == '\n') {
+                if (!overflow && line.size() == 18 && line.starts_with("STACKCHAN_RECORD ") &&
+                    line.back() >= '1' && line.back() <= '9') {
+                    usb_record(line.back() - '0');
+                } else if (!overflow && line.starts_with("STACKCHAN_CHAT ")) {
+                    const auto* payload = line.c_str() + sizeof("STACKCHAN_CHAT ") - 1;
+                    auto* decoded = cJSON_ParseWithOpts(payload, nullptr, true);
+                    if (cJSON_IsString(decoded) && decoded->valuestring[0] != '\0') {
+                        Application::GetInstance().Schedule([message = std::string(decoded->valuestring)]() {
+                            Application::GetInstance().SendChatText(message);
+                        });
+                    } else {
+                        ESP_LOGW(_tag, "USB chat invalid text");
+                    }
+                    cJSON_Delete(decoded);
+                } else if (!overflow && line.starts_with(prefix)) {
+                    auto url = line.substr(prefix.size());
+                    if (url.starts_with("http://") && url.find_first_of(" \r\t") == std::string::npos) {
+                        Application::GetInstance().Schedule([url = std::move(url)]() mutable {
+                            auto& app = Application::GetInstance();
+                            if (app.GetDeviceState() != kDeviceStateIdle) {
+                                ESP_LOGW(_tag, "USB speech busy");
+                                return;
+                            }
+                            app.StartNotification(std::move(url), {});
+                            if (app.GetDeviceState() != kDeviceStateNotifying) {
+                                ESP_LOGW(_tag, "USB speech failed to start");
+                            }
+                        });
+                    }
+                }
+                line.clear();
+                overflow = false;
+            } else if (line.size() < 4096) {
+                line += ch;
+            } else {
+                overflow = true;
+            }
+        }
+    }
+}
 
 /* -------------------------------------------------------------------------- */
 /*                            State and touch point                           */
@@ -117,6 +274,11 @@ void start_xiaozhi_app()
     // Initialize and run the application
     auto& app = Application::GetInstance();
     app.Initialize();
+    usb_serial_jtag_driver_config_t usb_config = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    if (usb_serial_jtag_driver_install(&usb_config) != ESP_OK ||
+        xTaskCreate(usb_speech_task, "usb_speech", 4096, nullptr, 2, nullptr) != pdPASS) {
+        ESP_LOGW(_tag, "USB speech unavailable");
+    }
     app.Run();  // This function runs the main event loop and never returns
 }
 
