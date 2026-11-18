@@ -11,19 +11,23 @@ import threading
 from pathlib import Path
 
 import serial
+from flomo_notes import run_notes
 from futu_query import run_query
 from progress import ProgressReporter
 from session import CodexSession
 from thetapilot import run_analysis
+from websearch import run_search
 
 logger = logging.getLogger("codex-voice")
 TASK_MARKER = "CodexVoice: TASK "
 FUTU_MARKER = "FutuVoice: QUERY "
+WEBSEARCH_MARKER = "WebSearchVoice: QUERY "
+FLOMO_MARKER = "FlomoVoice: QUERY "
 THETA_MARKER = "ThetaVoice: QUERY "
 
 
 def parse_task_event(line: str) -> dict | None:
-    for marker, tool in ((THETA_MARKER, "thetapilot"), (FUTU_MARKER, "futu"),
+    for marker, tool in ((THETA_MARKER, "thetapilot"), (FLOMO_MARKER, "flomo"), (WEBSEARCH_MARKER, "websearch"), (FUTU_MARKER, "futu"),
                          (TASK_MARKER, "codex")):
         if marker not in line:
             continue
@@ -67,6 +71,19 @@ async def handle_task(
         result = {"id": task["id"], "ok": result["ok"],
                   "text": json.dumps(result, ensure_ascii=False, allow_nan=False)}
         prefix = "STACKCHAN_THETA_RESULT "
+    elif tool == "flomo":
+        logger.info("Flomo operation started id=%s action=%s", task["id"], task["arguments"].get("action"))
+        result = await run_notes(task["arguments"])
+        logger.info("Flomo operation completed id=%s ok=%s elapsed_ms=%s", task["id"],
+                    result.get("ok"), result.get("elapsed_ms"))
+        result["id"] = task["id"]
+        prefix = "STACKCHAN_FLOMO_RESULT "
+    elif tool == "websearch":
+        logger.info("Web search started id=%s", task["id"])
+        result = await run_search(task["arguments"])
+        logger.info("Web search completed id=%s result=%s", task["id"], result)
+        result["id"] = task["id"]
+        prefix = "STACKCHAN_WEBSEARCH_RESULT "
     elif tool == "futu":
         logger.info("Futu query started id=%s arguments=%r", task["id"], task["arguments"])
         try:
@@ -109,7 +126,7 @@ async def handle_task(
     if len(packet) > 4096:
         # ThetaPilot's outer envelope carries its compact JSON as opaque text.
         result = {"id": task["id"], "ok": False,
-                  "summary" if tool in {"futu"} else "text": "结果过长，请在电脑日志中查看。"}
+                  "summary" if tool in {"futu", "websearch", "flomo"} else "text": "结果过长，请在电脑日志中查看。"}
         packet = (prefix + json.dumps(result, ensure_ascii=False) + "\n").encode()
     receipt = asyncio.Event() if tool == "codex" and result_acks is not None else None
     if receipt is not None:
@@ -162,7 +179,10 @@ async def serve(port: str, project: Path) -> None:
                         continue
                     line = pending.decode(errors="replace").rstrip()
                     pending.clear()
-                    logger.info("device %s", line)
+                    if FLOMO_MARKER in line:
+                        logger.info("device FlomoVoice: QUERY (note content omitted)")
+                    else:
+                        logger.info("device %s", line)
                     match = re.search(r"CodexVoice: RESULT job=(\d+) stored", line)
                     if match:
                         loop.call_soon_threadsafe(acknowledge, int(match.group(1)))

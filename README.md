@@ -27,6 +27,12 @@ USB 桥接还支持 `self.futu.execute`：直接查询 Mac 上已登录的 OpenD
 ThetaPilot `/gex` 的 Gamma、IV 和期限结构数据，由小智用三句话解读关键价位与风险。
 接入方式见 [ThetaPilot 标的分析](firmware/README.md#thetapilot-标的分析)。
 
+`self.websearch.execute` 通过同一 USB 桥接直接使用 Firecrawl 搜索网络，返回带来源链接的
+网页摘要，由小智回答并播报，不需要启动 Codex 任务。详见 [网络搜索工具](firmware/README.md#网络搜索工具)。
+
+`self.flomo.execute` 支持将语音笔记保存到 flomo；另配官方 MCP Token 后可搜索、读取和更新
+笔记。传统 API URL 只支持新建。详见 [flomo 笔记工具](firmware/README.md#flomo-笔记工具)。
+
 ## 仓库内容
 
 | 目录 | 内容 | 文档 |

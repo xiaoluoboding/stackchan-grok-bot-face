@@ -174,3 +174,139 @@ OpenD 返回腾讯控股最新成交价 372、较昨收 -1.0638%，行情时间�
 14:16:31。小智播报了价格、涨跌幅和时间，设备确认扬声器收到音频并回到待机。
 该测试覆盖工具选择、OpenD 查询、USB 回传和原音色播报，未重测麦克风听写。
 播报期间观察到一次 LVGL 任务导致的 IDLE1 看门狗告警，未发生重启；界面调度仍可继续优化。
+
+### 网络搜索工具
+
+启用 `CONFIG_STACKCHAN_CODEX_VOICE_USB` 并刷入包含此功能的固件后，设备向小智注册
+`self.websearch.execute`。问「联网查一下 Side Copilot 是什么产品」，小智调用工具，
+Mac 通过 Firecrawl MCP 搜索并将网页标题、来源链接、搜索摘要交回小智，用原音色回答。
+网络搜索直接执行，不等待 Codex 会话预热，不启动额外的 Codex 任务。
+
+工具参数：
+
+~~~json
+{"query":"\"Side Copilot\" browser extension features","limit":3}
+~~~
+
+`query` 必填，最多 512 UTF-8 字节；`limit` 可省略，默认为 3，支持 1–3 条。
+产品名称有歧义时建议使用引号和准确关键词。返回的是搜索摘要，不是已阅读全文的核实结论；
+小智按摘要简短回答，按需提及来源，默认不逐字朗读链接。需要深入阅读全文的研究仍可交给 Codex。
+
+密钥按以下顺序读取，不需要将密钥复制到项目中：
+
+1. 桥接进程环境中的 `FIRECRAWL_API_KEY`。
+2. 当前用户 Codex 配置的 `mcp_servers.firecrawl.http_headers.Authorization`，或
+   `bearer_token_env_var` 指定的环境变量。配置目录默认为 `~/.codex`，支持 `CODEX_HOME`。
+3. 未提供密钥时，使用 Firecrawl 官方免密入口，受免费额度和频率限制。
+
+默认地址为 `https://mcp.firecrawl.dev/v2/mcp`；已有 Firecrawl 远程配置时复用其 URL，
+也可通过 `STACKCHAN_FIRECRAWL_MCP_URL` 覆盖。此桥接不启动本地 stdio Firecrawl 服务，
+也不读取 Codex 的 OAuth 凭据。密钥保留在 Mac，不传入设备或写进日志。
+
+使用前文的 USB 桥接启动命令即可，不需要新增 Python 依赖。更新代码后需重启桥接进程。
+Firecrawl 请求超时为 20 秒，设备端等待上限为 35 秒；失败会返回明确错误，
+不会编造结果或静默转入耗时更长的 Codex 任务。USB 结果裁剪至 4 KB 内并保留来源 URL。
+
+电脑端真实搜索测试（会使用 Firecrawl 额度）：
+
+~~~bash
+python3 tools/codex/websearch.py '{"query":"\"Side Copilot\" browser extension features","limit":3}'
+~~~
+
+无需网络或设备的回归测试，在仓库根目录执行：
+
+~~~bash
+uv run --with pytest --with pyserial --with openai-codex==0.170.0 \
+  python -m pytest tools/codex -q
+~~~
+
+日志链路为 `WebSearchVoice: QUERY` → `Web search completed` →
+`WebSearchVoice: RESULT` → 小智语音回复。`elapsed_ms` 只表示 Firecrawl 请求耗时，
+不包含听写、USB 回传与语音合成。
+
+2026-11-18 已刷入应用并通过 Mac 扬声器播放唤醒词和查询语句，完成三轮
+「设备麦克风 → 小智听写 → `self.websearch.execute` → Firecrawl → 原音色播报」测试。
+时间起点为 Mac `say` 进程结束，播报起点取设备的 `Speech audio delivered to speaker`
+日志，并非麦克风声学测量；三轮最终均回到待机。
+
+| 问法 | Firecrawl 请求 | 开始播报结果 | 内容效果 |
+| --- | --- | --- | --- |
+| 较长中文句，混读 Side Copilot | 2.93 秒 | 6.53 秒 | 听写漏掉产品名，回答了浏览器扩展的一般用途 |
+| 英文问句，要求中文回答 | 3.27 秒 | 9.05 秒 | 正确命中官网，中文介绍侧边栏 AI 的研究、整理和网页自动化功能 |
+| 简短中文句，混读 Side Copilot | 5.27 秒 | 11.30 秒 | 名称误识别为 `sci code pilot`，回答未找到准确产品并询问是否指 SciSpace |
+
+正确命中的英文问句为 `Search the web for Side Copilot browser extension. What does
+Side Copilot do? Please answer in Chinese.`，该轮播报结束并回到待机耗时 25.77 秒。
+这几次测试说明搜索、USB 回传和播报已连通，但中文混读英文产品名仍不可靠；
+搜索速度不能替代对听写准确性的检查。测试中另观察到两次 IDLE 任务看门狗告警，
+涉及 `audio_input` / `taskLVGL`，未引起重启，仍有音频和界面调度方面的优化空间。
+
+### flomo 笔记工具
+
+USB 语音模式下，`self.flomo.execute` 直接由 Mac 执行，不启动 Codex 任务。
+新建优先使用 flomo 官方传统 API URL；搜索、读取和更新使用官方远程 MCP
+`https://flomoapp.com/mcp`。传统 API URL 无法读取旧笔记，需要另配 MCP Token，
+不能将写入成功视为已获得读取权限。
+
+官方文档：
+
+- [传统 API](https://help.flomoapp.com/advance/api.html)
+- [MCP Token 创建与管理](https://help.flomoapp.com/advance/mcp/token.html)
+- [官方 Token 连接格式及权限](https://help.flomoapp.com/advance/mcp/connect-openclaw.html)
+
+在仓库根目录运行本地隐藏输入脚本：
+
+~~~bash
+python3 tools/codex/configure_flomo.py
+~~~
+
+先粘贴完整 API URL；没有 MCP Token 时，在第二个提示处直接回车跳过即可。
+配置脚本不会创建笔记，提供 Token 时只握手并获取工具定义。凭据保存在
+`~/.config/stackchan/flomo.json`，文件权限为 600，不进入仓库、固件或工具参数。
+可用 `STACKCHAN_FLOMO_CONFIG` 覆盖读取位置，或通过桥接环境设置 `FLOMO_API_URL`
+及 `FLOMO_MCP_TOKEN`，环境变量优先。不要将凭据发送到聊天、放进命令参数或提交到 Git。
+
+首次加入设备工具需编译并刷入应用，再重启 USB 桥接。以后修改凭据不需要刷机，
+桥接每次操作会重新读取配置。只有 API URL 时，对机器人说：
+「帮我在浮墨笔记记一下：今天完成了机器人的网络搜索功能，标签 StackChan。」
+
+工具参数例子：
+
+~~~json
+{"action":"create","text":"今天完成了机器人的网络搜索功能。\n#StackChan"}
+{"action":"search","text":"StackChan","limit":3}
+{"action":"read","memo_id":"从搜索结果取得的真实笔记 ID"}
+{"action":"update","memo_id":"明确指定的真实笔记 ID","text":"替换后的完整正文。\n#StackChan"}
+~~~
+
+`action` 必填；`text` 是正文或搜索词，最多 2048 UTF-8 字节；`memo_id` 最多 128 字节。
+`limit` 默认 3，范围 1–3。长笔记返回 `truncated` 和 `next_offset`，可在 `read` 的
+下一次调用中传 `offset` 继续读取；单条 USB 响应控制在 4 KB 内。官方 MCP 工具参数
+在运行时通过 `tools/list` 核对，遇到不兼容参数会报错，不猜测参数后执行修改。
+
+写入仅在明确要求保存时执行，更新需要明确指定笔记；不提供删除工具。
+正文中的 `#标签` 直接保留。保存只在 API 业务响应成功后确认；写入超时或断线时
+会提示「结果未确认」，不会自动重试，避免丢失响应后重复创建笔记。
+网络操作上限 25 秒，设备等待上限 35 秒。桥接不记录完整 flomo 请求正文或返回笔记，
+但原小智服务的听写和播报日志可能包含用户口述的笔记内容。
+
+电脑端调用（`create` 会真实保存一条笔记）：
+
+~~~bash
+python3 tools/codex/flomo_notes.py '{"action":"create","text":"StackChan 接入测试。\n#StackChan/测试"}'
+~~~
+
+日志链路为 `FlomoVoice: QUERY` → `Flomo operation completed` → `FlomoVoice: RESULT`。
+当前仅配置传统 API URL，读取能力的真实账号验证需待 MCP Token 配置后完成。
+
+2026-11-18 已配置传统 API URL，完成应用编译和刷机，并重启 USB 桥接：
+
+- 电脑端写入一条明确标注的 `StackChan 接入测试` 笔记，API 业务响应成功，耗时约 0.35 秒。
+- Mac 扬声器唤醒后口述保存测试笔记，设备选择 `self.flomo.execute` 的 `create`，
+  API 响应成功，耗时 0.30 秒；机器人确认「好啦，已经帮你保存到浮墨笔记啦」并回到待机。
+- 以设备听写文本日志为起点，到扬声器音频接收确认为止约 2.77 秒，并非声学测量。
+  本轮听写在整段合成语音结束前已收尾，漏掉末尾标签要求；因此不将播放结束后的
+  1.48 秒作为完整问句的有效延迟，也不将本轮视为标签听写验证。
+- 已创建两条标注为测试的笔记；未读取、修改或删除既有笔记。正文及 `#标签` 的
+  API 原样传递、写入不自动重试、USB 消息边界和缺少读取凭据时的行为均有离线回归测试。
+- 无 MCP Token 的真实搜索调用返回明确的权限配置说明，没有伪造读取结果。

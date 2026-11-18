@@ -150,6 +150,34 @@ static void usb_speech_task(void*)
                     line.back() >= '1' && line.back() <= '9') {
                     usb_record(line.back() - '0');
 #ifdef CONFIG_STACKCHAN_CODEX_VOICE_USB
+                } else if (!overflow && line.starts_with("STACKCHAN_FLOMO_RESULT ")) {
+                    auto* result = cJSON_Parse(line.c_str() + strlen("STACKCHAN_FLOMO_RESULT "));
+                    auto* id = cJSON_GetObjectItem(result, "id");
+                    auto* ok = cJSON_GetObjectItem(result, "ok");
+                    if (cJSON_IsNumber(id) && cJSON_IsBool(ok)) {
+                        if (auto* json = cJSON_PrintUnformatted(result)) {
+                            Application::GetInstance().Schedule(
+                                [job_id = id->valueint, text = std::string(json), error = !cJSON_IsTrue(ok)]() {
+                                    Application::GetInstance().CompleteFlomoOperation(job_id, text, error);
+                                });
+                            cJSON_free(json);
+                        }
+                    }
+                    cJSON_Delete(result);
+                } else if (!overflow && line.starts_with("STACKCHAN_WEBSEARCH_RESULT ")) {
+                    auto* result = cJSON_Parse(line.c_str() + strlen("STACKCHAN_WEBSEARCH_RESULT "));
+                    auto* id = cJSON_GetObjectItem(result, "id");
+                    auto* ok = cJSON_GetObjectItem(result, "ok");
+                    if (cJSON_IsNumber(id) && cJSON_IsBool(ok)) {
+                        if (auto* json = cJSON_PrintUnformatted(result)) {
+                            Application::GetInstance().Schedule(
+                                [job_id = id->valueint, text = std::string(json), error = !cJSON_IsTrue(ok)]() {
+                                    Application::GetInstance().CompleteWebSearch(job_id, text, error);
+                                });
+                            cJSON_free(json);
+                        }
+                    }
+                    cJSON_Delete(result);
                 } else if (!overflow && line.starts_with("STACKCHAN_THETA_RESULT ")) {
                     auto* result = cJSON_Parse(line.c_str() + strlen("STACKCHAN_THETA_RESULT "));
                     auto* id = cJSON_GetObjectItem(result, "id");
