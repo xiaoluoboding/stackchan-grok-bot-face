@@ -17,6 +17,16 @@
 
 这些行为已在一台 M5Stack StackChan（ESP32-S3、16 MB Flash、8 MB PSRAM）上验证：设备连接 Wi-Fi 和语音服务后，能够用“你好小智”唤醒并正常回复，待机时头部不再自动摆动。不同网络和设备上的效果仍应自行验证。
 
+## 本地行情与标的分析
+
+USB 桥接还支持 `self.futu.execute`：直接查询 Mac 上已登录的 OpenD，取得股票行情快照，
+由小智简短播报价格和涨跌幅。对机器人说「用富途查询腾讯控股的行情」即可。
+安装与参数见 [本地富途行情工具](firmware/README.md#本地富途行情工具)。
+
+需要分析标的时，可说「用 ThetaPilot 分析英伟达」。`self.thetapilot.execute` 读取本机
+ThetaPilot `/gex` 的 Gamma、IV 和期限结构数据，由小智用三句话解读关键价位与风险。
+接入方式见 [ThetaPilot 标的分析](firmware/README.md#thetapilot-标的分析)。
+
 ## 仓库内容
 
 | 目录 | 内容 | 文档 |

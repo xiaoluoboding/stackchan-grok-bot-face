@@ -1,5 +1,4 @@
 diff --git a/main/application.cc b/main/application.cc
-index 31de205..da9a598 100644
 --- a/main/application.cc
 +++ b/main/application.cc
 @@ -1,4 +1,5 @@
@@ -8,7 +7,135 @@ index 31de205..da9a598 100644
  #include "assets.h"
  #include "assets/lang_config.h"
  #include "audio_codec.h"
-@@ -440,20 +441,44 @@ void Application::CheckAssetsVersion() {
+@@ -105,6 +106,65 @@
+     auto& mcp_server = McpServer::GetInstance();
+     mcp_server.AddCommonTools();
+     mcp_server.AddUserOnlyTools();
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE_USB
++    mcp_server.AddTool(
++        "self.thetapilot.execute",
++        "Analyze a US stock using the local ThetaPilot /gex dashboard. Use for stock "
++        "analysis, gamma/GEX, key strike concentrations, IV rank and volatility risks; "
++        "use self.futu.execute only for simple prices. symbol is a US ticker, e.g. NVDA "
++        "(NVIDIA), TSM (TSMC), AAPL. Returns compact data for the eight dashboard views. "
++        "Give three short Chinese sentences on key levels, IV and risk. GEX is estimated, "
++        "not a direction forecast or guaranteed support/resistance. Mention missing panels "
++        "briefly. Do not read timestamps unless asked. Never invent missing numbers.",
++        PropertyList({Property("symbol", kPropertyTypeString).SetMaxLength(18)}),
++        [](const PropertyList&) -> ToolResult {
++            return std::unexpected("ThetaPilot requires the USB bridge");
++        });
++    mcp_server.AddTool(
++        "self.futu.execute",
++        "Query stock prices from Futu OpenD on the USB-connected Mac. Read-only. "
++        "For stock quote requests prefer this tool over Codex or web search. "
++        "action must be get_market_snapshot. codes is one to three market-prefixed "
++        "stock codes separated by commas, e.g. HK.00700 (Tencent), US.AAPL (Apple), "
++        "US.NVDA (NVIDIA), HK.01810 (Xiaomi). Returns quotes and a Chinese summary. "
++        "Briefly read the Chinese summary with price and change only. "
++        "Do not mention the quote timestamp or timezone unless the user asks for it. "
++        "Never invent prices or claim live data.",
++        PropertyList({Property("action", kPropertyTypeString).SetMaxLength(32),
++                      Property("codes", kPropertyTypeString).SetMaxLength(96)}),
++        [](const PropertyList&) -> ToolResult {
++            return std::unexpected("Futu requires the USB bridge");
++        });
++    mcp_server.AddTool(
++        "self.codex.execute",
++        "Start a Codex task on the connected Mac for project, Git, code, test, file "
++        "or web research requests. Returns immediately with a job ID. "
++        "After starting, call self.codex.result repeatedly until status is completed. "
++        "Call this tool immediately before speaking, so execution starts promptly. "
++        "Do not submit the same task again. After starting, acknowledge with one short "
++        "sentence, then poll. For status=progress, MUST speak the summary aloud "
++        "BEFORE calling any tool again. Read each new progress message once briefly, "
++        "continue polling, then read the completed summary.",
++        PropertyList({Property("task", kPropertyTypeString).SetMaxLength(2048)}),
++        [](const PropertyList&) -> ToolResult {
++            return std::unexpected("Codex requires the USB cloud bridge");
++        });
++    mcp_server.AddTool(
++        "self.codex.result",
++        "Query the current or most recent Codex job. Waits up to 8 seconds. "
++        "status=progress is a new user-facing update: MUST speak summary aloud "
++        "in Chinese BEFORE calling this tool again. This is not a silent wait. "
++        "Only status=running means poll silently. Do not skip progress updates. "
++        "Never invent progress or percentages. "
++        "When completed, read the summary to the user. Also use this tool when "
++        "the user asks about progress or results after reconnecting. "
++        "The device notification '任务结果' means query this tool for the latest "
++        "progress or completed result. Do not start a new task for this notification.",
++        PropertyList(),
++        [](const PropertyList&) -> ToolResult {
++            return std::unexpected("Codex requires the USB cloud bridge");
++        });
++#endif
+ 
+     // Set network event callback for UI updates and network state handling
+     board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
+@@ -257,6 +317,11 @@
+ 
+         if (bits & MAIN_EVENT_VAD_CHANGE) {
+             if (GetDeviceState() == kDeviceStateListening) {
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE
++                if (audio_service_.IsVoiceDetected()) {
++                    command_last_voice_us_ = esp_timer_get_time();
++                }
++#endif
+                 auto led = Board::GetInstance().GetLed();
+                 led->OnStateChanged();
+             }
+@@ -275,6 +340,49 @@
+             clock_ticks_++;
+             auto display = Board::GetInstance().GetDisplay();
+             display->UpdateStatusBar();
++
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE
++            if (GetDeviceState() == kDeviceStateListening &&
++                listening_mode_ == kListeningModeAutoStop &&
++                dynamic_cast<WebsocketProtocol*>(protocol_.get()) &&
++                command_listen_started_us_ != 0) {
++                const int64_t now = esp_timer_get_time();
++                if (audio_service_.IsVoiceDetected()) {
++                    command_last_voice_us_ = now;
++                }
++                const bool silence = command_last_voice_us_ != 0 &&
++                    now - command_last_voice_us_ >= 2000000;
++                const bool expired = now - command_listen_started_us_ >= 15000000;
++                if (silence || expired) {
++                    ESP_LOGI(TAG, "Codex command recording complete: %s",
++                             silence ? "silence" : "duration limit");
++                    HandleStopListeningEvent();
++                }
++            }
++#endif
++
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE_USB
++            if (theta_request_id_ >= 0 && esp_timer_get_time() >= theta_deadline_us_) {
++                CompleteThetaQuery(theta_job_id_,
++                    "{\"ok\":false,\"summary\":\"ThetaPilot 分析超时，请稍后重试。\"}", true);
++            }
++            if (futu_request_id_ >= 0 && esp_timer_get_time() >= futu_deadline_us_) {
++                CompleteFutuQuery(futu_job_id_,
++                    "{\"ok\":false,\"summary\":\"本地行情查询超时，请检查电脑 USB 桥接和 OpenD。\"}", true);
++            }
++            if (codex_status_request_id_ >= 0 &&
++                esp_timer_get_time() >= codex_status_deadline_us_) {
++                ReplyCodexStatus(codex_status_request_id_);
++            }
++            if (codex_announce_pending_ && GetDeviceState() == kDeviceStateIdle &&
++                esp_timer_get_time() >= codex_announce_deadline_us_) {
++                codex_announce_deadline_us_ = esp_timer_get_time() + 30000000;
++                // Use a short wake notification. The service then reads the
++                // cached summary through self.codex.result in a fresh session.
++                ESP_LOGI("CodexVoice", "Reconnecting to announce task progress or result");
++                SendChatText("任务结果");
++            }
++#endif
+ 
+             // Print debug info every 10 seconds
+             if (clock_ticks_ % 10 == 0) {
+@@ -440,20 +548,44 @@
  }
  
  void Application::CheckNewVersion() {
@@ -28,9 +155,10 @@ index 31de205..da9a598 100644
          auto display = board.GetDisplay();
 +#ifdef CONFIG_STACKCHAN_AUTO_INSTALL_FIRMWARE_UPDATES
          display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
-+#endif
- 
+-
 -        auto check = ota_->CheckVersion();
++#endif
++
 +        auto display_for_tls = board.GetDisplay();
 +        if (display_for_tls) {
 +            display_for_tls->SetAnimationSuspended(true);
@@ -55,7 +183,7 @@ index 31de205..da9a598 100644
                  return;
              }
  
-@@ -491,23 +516,31 @@ void Application::CheckNewVersion() {
+@@ -491,23 +623,31 @@
          retry_delay = 10;  // Reset retry delay
  
          if (ota_->HasNewVersion()) {
@@ -91,7 +219,7 @@ index 31de205..da9a598 100644
          }
  
          // This will block the loop until the activation is done or timeout
-@@ -535,9 +568,31 @@ void Application::InitializeProtocol() {
+@@ -535,9 +675,31 @@
  
      display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
  
@@ -125,7 +253,189 @@ index 31de205..da9a598 100644
          protocol_ = std::make_unique<WebsocketProtocol>();
      } else {
          ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
-@@ -725,30 +780,6 @@ void Application::InitializeProtocol() {
+@@ -552,6 +714,11 @@
+     });
+ 
+     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE_USB
++        if (codex_readback_ && codex_audio_packets_.fetch_add(1) == 0) {
++            ESP_LOGI("CodexVoice", "RESULT audio received, state=%d", GetDeviceState());
++        }
++#endif
+         if (GetDeviceState() == kDeviceStateSpeaking) {
+             audio_service_.PushPacketToDecodeQueue(std::move(packet));
+         }
+@@ -570,6 +737,11 @@
+     protocol_->OnAudioChannelClosed([this, &board]() {
+         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+         Schedule([this]() {
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE_USB
++            codex_status_request_id_ = -1;
++            futu_request_id_ = -1;
++            theta_request_id_ = -1;
++#endif
+             auto display = Board::GetInstance().GetDisplay();
+             display->SetChatMessage("system", "");
+             SetDeviceState(kDeviceStateIdle);
+@@ -624,13 +796,27 @@
+             if (strcmp(state->valuestring, "start") == 0) {
+                 Schedule([this]() {
+                     aborted_ = false;
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE
++                    extern void stackchan_arm_chat_output();
++                    stackchan_arm_chat_output();
++#endif
+                     SetDeviceState(kDeviceStateSpeaking);
+                 });
+             } else if (strcmp(state->valuestring, "stop") == 0) {
+                 Schedule([this]() {
+                     if (GetDeviceState() == kDeviceStateSpeaking) {
+-                        if (listening_mode_ == kListeningModeManualStop) {
++                        if (listening_mode_ == kListeningModeManualStop
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE
++                            || dynamic_cast<WebsocketProtocol*>(protocol_.get())
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE_USB
++                            || codex_readback_ || codex_task_pending_
++#endif
++#endif
++                        ) {
+                             SetDeviceState(kDeviceStateIdle);
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE_USB
++                            codex_readback_ = false;
++#endif
+                         } else {
+                             SetDeviceState(kDeviceStateListening);
+                         }
+@@ -661,6 +847,7 @@
+                     glyphs.clear();
+                 }
+                 ESP_LOGI(TAG, ">> %s", text->valuestring);
++
+                 Schedule([display, message = std::string(text->valuestring),
+                           glyphs = std::move(glyphs), bpp]() {
+                     display->AddTextGlyphs(glyphs, bpp);
+@@ -677,6 +864,120 @@
+         } else if (strcmp(type->valuestring, "mcp") == 0) {
+             auto payload = cJSON_GetObjectItem(root, "payload");
+             if (cJSON_IsObject(payload)) {
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE_USB
++                auto* method = cJSON_GetObjectItem(payload, "method");
++                auto* params = cJSON_GetObjectItem(payload, "params");
++                auto* name = cJSON_GetObjectItem(params, "name");
++                auto* arguments = cJSON_GetObjectItem(params, "arguments");
++                auto* task = cJSON_GetObjectItem(arguments, "task");
++                auto* id = cJSON_GetObjectItem(payload, "id");
++                if (cJSON_IsString(method) && strcmp(method->valuestring, "tools/call") == 0 &&
++                    cJSON_IsString(name) && cJSON_IsNumber(id)) {
++                    if (strcmp(name->valuestring, "self.thetapilot.execute") == 0) {
++                        auto* symbol = cJSON_GetObjectItem(arguments, "symbol");
++                        if (!cJSON_IsString(symbol) || symbol->valuestring[0] == '\0' ||
++                            strlen(symbol->valuestring) > 18) {
++                            Schedule([this, request_id = id->valueint]() {
++                                SendBridgeToolResult(request_id, "Invalid ThetaPilot symbol", true);
++                            });
++                            return;
++                        }
++                        Schedule([this, request_id = id->valueint,
++                                  symbol = std::string(symbol->valuestring)]() {
++                            if (theta_request_id_ >= 0) {
++                                SendBridgeToolResult(request_id, "ThetaPilot 分析进行中，请稍后重试。", true);
++                                return;
++                            }
++                            theta_request_id_ = request_id;
++                            theta_job_id_ = (esp_random() & 0x3fffffff) + 1;
++                            theta_deadline_us_ = esp_timer_get_time() + 22000000;
++                            auto* event = cJSON_CreateObject();
++                            cJSON_AddNumberToObject(event, "id", theta_job_id_);
++                            auto* args = cJSON_AddObjectToObject(event, "arguments");
++                            cJSON_AddStringToObject(args, "symbol", symbol.c_str());
++                            if (auto* json = cJSON_PrintUnformatted(event)) {
++                                ESP_LOGI("ThetaVoice", "QUERY %s", json);
++                                cJSON_free(json);
++                            }
++                            cJSON_Delete(event);
++                        });
++                        return;
++                    }
++                    if (strcmp(name->valuestring, "self.futu.execute") == 0) {
++                        auto* action = cJSON_GetObjectItem(arguments, "action");
++                        auto* codes = cJSON_GetObjectItem(arguments, "codes");
++                        if (!cJSON_IsString(action) || !cJSON_IsString(codes) ||
++                            strlen(action->valuestring) > 32 || strlen(codes->valuestring) > 96) {
++                            Schedule([this, request_id = id->valueint]() {
++                                SendBridgeToolResult(request_id, "Invalid Futu action or codes", true);
++                            });
++                            return;
++                        }
++                        Schedule([this, request_id = id->valueint,
++                                  action = std::string(action->valuestring),
++                                  codes = std::string(codes->valuestring)]() {
++                            if (futu_request_id_ >= 0) {
++                                SendBridgeToolResult(request_id, "行情查询进行中，请稍后重试。", true);
++                                return;
++                            }
++                            futu_request_id_ = request_id;
++                            futu_job_id_ = (esp_random() & 0x3fffffff) + 1;
++                            futu_deadline_us_ = esp_timer_get_time() + 18000000;
++                            auto* event = cJSON_CreateObject();
++                            cJSON_AddNumberToObject(event, "id", futu_job_id_);
++                            auto* args = cJSON_AddObjectToObject(event, "arguments");
++                            cJSON_AddStringToObject(args, "action", action.c_str());
++                            cJSON_AddStringToObject(args, "codes", codes.c_str());
++                            if (auto* json = cJSON_PrintUnformatted(event)) {
++                                ESP_LOGI("FutuVoice", "QUERY %s", json);
++                                cJSON_free(json);
++                            }
++                            cJSON_Delete(event);
++                        });
++                        return;
++                    }
++                    if (strcmp(name->valuestring, "self.codex.execute") == 0 &&
++                        cJSON_IsString(task) && task->valuestring[0] != '\0' &&
++                        strlen(task->valuestring) <= 2048) {
++                        Schedule([this, request_id = id->valueint,
++                                  text = std::string(task->valuestring)]() {
++                            if (!codex_task_pending_) {
++                                codex_request_id_ = (esp_random() & 0x3fffffff) + 1;
++                                codex_task_result_.clear();
++                                codex_task_progress_.clear();
++                                codex_progress_sequence_ = 0;
++                                codex_progress_unread_ = false;
++                                codex_announce_pending_ = false;
++                                codex_task_pending_ = true;
++                                auto* event = cJSON_CreateObject();
++                                cJSON_AddNumberToObject(event, "id", codex_request_id_);
++                                cJSON_AddStringToObject(event, "text", text.c_str());
++                                if (auto* json = cJSON_PrintUnformatted(event)) {
++                                    ESP_LOGI("CodexVoice", "TASK %s", json);
++                                    cJSON_free(json);
++                                }
++                                cJSON_Delete(event);
++                            }
++                            ReplyCodexStatus(request_id);
++                        });
++                        return;
++                    }
++                    if (strcmp(name->valuestring, "self.codex.result") == 0) {
++                        Schedule([this, request_id = id->valueint]() {
++                            if (codex_status_request_id_ >= 0) {
++                                ReplyCodexStatus(codex_status_request_id_);
++                            }
++                            if (codex_task_pending_ && !codex_progress_unread_) {
++                                codex_status_request_id_ = request_id;
++                                codex_status_deadline_us_ = esp_timer_get_time() + 8000000;
++                            } else {
++                                ReplyCodexStatus(request_id);
++                            }
++                        });
++                        return;
++                    }
++                }
++#endif
+                 McpServer::GetInstance().ParseMessage(payload);
+             }
+         } else if (strcmp(type->valuestring, "system") == 0) {
+@@ -725,30 +1026,6 @@
      protocol_->Start();
  }
  
@@ -156,7 +466,7 @@ index 31de205..da9a598 100644
  void Application::Alert(const char* status, const char* message, const char* emotion,
                          const std::string_view& sound) {
      ESP_LOGW(TAG, "Alert [%s] %s: %s", emotion, status, message);
-@@ -833,6 +864,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
+@@ -833,6 +1110,7 @@
          if (!protocol_->OpenAudioChannel()) {
              // Return to idle so the device is not stuck in the connecting
              // state (not every failure path reports a network error)
@@ -164,7 +474,7 @@ index 31de205..da9a598 100644
              SetDeviceState(kDeviceStateIdle);
              return;
          }
-@@ -970,6 +1002,7 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
+@@ -970,6 +1248,7 @@
              // Return to idle so the device is not stuck in the connecting
              // state (not every failure path reports a network error), and
              // wake word detection is re-enabled by the idle state handler.
@@ -172,10 +482,157 @@ index 31de205..da9a598 100644
              SetDeviceState(kDeviceStateIdle);
              return;
          }
-@@ -1264,6 +1297,33 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
+@@ -1074,6 +1353,14 @@
+     if (GetDeviceState() != kDeviceStateListening) {
+         return;
      }
- }
++
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE
++    command_listen_started_us_ = esp_timer_get_time();
++    command_last_voice_us_ = 0;
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE_USB
++    codex_readback_ = false;
++#endif
++#endif
  
+     // Send the start listening command
+     protocol_->SendStartListening(listening_mode_);
+@@ -1262,6 +1549,163 @@
+         Reboot();
+         return true;
+     }
++}
++
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE_USB
++void Application::UpdateCodexProgress(int job_id, int sequence, const std::string& text) {
++    if (job_id != codex_request_id_ || !codex_task_pending_ ||
++        sequence <= codex_progress_sequence_ || text.empty() || text.size() > 600) {
++        return;
++    }
++    codex_progress_sequence_ = sequence;
++    codex_task_progress_ = text;
++    codex_progress_unread_ = true;
++    if (!codex_announce_pending_) {
++        codex_announce_deadline_us_ = 0;
++    }
++    codex_announce_pending_ = true;
++    // If the speech session ended, reconnect for this update when idle.
++    ESP_LOGI("CodexVoice", "PROGRESS job=%d seq=%d stored", job_id, sequence);
++    if (codex_status_request_id_ >= 0) {
++        ReplyCodexStatus(codex_status_request_id_);
++    }
++}
++
++void Application::CompleteCodexTask(int job_id, const std::string& text) {
++    if (job_id != codex_request_id_) {
++        ESP_LOGW("CodexVoice", "Ignoring stale task result");
++        return;
++    }
++    if (!codex_task_pending_) {
++        ESP_LOGI("CodexVoice", "RESULT job=%d stored", job_id);
++        return;
++    }
++    // Store completion before touching the network. It remains queryable if
++    // the cloud session disconnected while Codex was working.
++    codex_task_result_ = text;
++    codex_task_pending_ = false;
++    codex_progress_unread_ = false;
++    codex_task_progress_.clear();
++    codex_announce_pending_ = true;
++    codex_announce_deadline_us_ = 0;
++    ESP_LOGI("CodexVoice", "RESULT job=%d stored", job_id);
++    if (codex_status_request_id_ >= 0) {
++        ReplyCodexStatus(codex_status_request_id_);
++    }
++}
++
++void Application::ReplyCodexStatus(int request_id) {
++    codex_status_request_id_ = -1;
++    const bool has_progress = codex_task_pending_ && codex_progress_unread_;
++    const char* status = has_progress ? "progress" : codex_task_pending_ ? "running" :
++                         (codex_request_id_ == 0 ? "idle" : "completed");
++    auto* state = cJSON_CreateObject();
++    cJSON_AddNumberToObject(state, "job_id", codex_request_id_);
++    cJSON_AddStringToObject(state, "status", status);
++    if (has_progress) {
++        cJSON_AddStringToObject(state, "progress", codex_task_progress_.c_str());
++        cJSON_AddStringToObject(state, "summary", codex_task_progress_.c_str());
++        cJSON_AddBoolToObject(state, "read_aloud", true);
++        cJSON_AddStringToObject(state, "next_action",
++            "先向用户简短播报 summary 中的实际执行进度，再调用 self.codex.result。任务仍在执行。不得跳过播报直接查询。");
++        cJSON_AddNumberToObject(state, "progress_seq", codex_progress_sequence_);
++        codex_progress_unread_ = false;
++        codex_announce_pending_ = false;
++    } else if (!codex_task_pending_) {
++        codex_announce_pending_ = false;
++        cJSON_AddStringToObject(state, "summary", codex_task_result_.c_str());
++    }
++    auto* text = cJSON_PrintUnformatted(state);
++    cJSON_Delete(state);
++    if (!text) {
++        return;
++    }
++    SendBridgeToolResult(request_id, text, false);
++    cJSON_free(text);
++    ESP_LOGI("CodexVoice", "STATUS request=%d job=%d status=%s",
++             request_id, codex_request_id_, status);
++}
++
++void Application::CompleteThetaQuery(int job_id, const std::string& text, bool is_error) {
++    if (theta_request_id_ < 0 || job_id != theta_job_id_) {
++        ESP_LOGW("ThetaVoice", "Ignoring stale query result job=%d", job_id);
++        return;
++    }
++    const int request_id = theta_request_id_;
++    theta_request_id_ = -1;
++    SendBridgeToolResult(request_id, text.c_str(), is_error);
++    ESP_LOGI("ThetaVoice", "RESULT request=%d job=%d error=%d", request_id, job_id, is_error);
++}
++
++void Application::CompleteFutuQuery(int job_id, const std::string& text, bool is_error) {
++    if (futu_request_id_ < 0 || job_id != futu_job_id_) {
++        ESP_LOGW("FutuVoice", "Ignoring stale query result job=%d", job_id);
++        return;
++    }
++    const int request_id = futu_request_id_;
++    futu_request_id_ = -1;
++    SendBridgeToolResult(request_id, text.c_str(), is_error);
++    ESP_LOGI("FutuVoice", "RESULT request=%d job=%d error=%d", request_id, job_id, is_error);
++}
++
++void Application::SendBridgeToolResult(int request_id, const char* text, bool is_error) {
++    auto* response = cJSON_CreateObject();
++    cJSON_AddStringToObject(response, "jsonrpc", "2.0");
++    cJSON_AddNumberToObject(response, "id", request_id);
++    auto* result = cJSON_AddObjectToObject(response, "result");
++    auto* content = cJSON_AddArrayToObject(result, "content");
++    auto* item = cJSON_CreateObject();
++    cJSON_AddStringToObject(item, "type", "text");
++    cJSON_AddStringToObject(item, "text", text);
++    cJSON_AddItemToArray(content, item);
++    cJSON_AddBoolToObject(result, "isError", is_error);
++    if (auto* json = cJSON_PrintUnformatted(response)) {
++        // Reopen the UDP return path for every short status response.
++        if (dynamic_cast<MqttProtocol*>(protocol_.get())) {
++            auto silence = std::make_unique<AudioStreamPacket>();
++            silence->payload = {0xbb, 0x03, 0xff, 0xfe, 0xff, 0xfe, 0xff, 0xfe};
++            if (!protocol_->SendAudio(std::move(silence))) {
++                ESP_LOGW("CodexVoice", "Audio return path unavailable; result remains cached");
++            }
++        }
++        codex_audio_packets_ = 0;
++        codex_readback_ = true;
++        aborted_ = false;
++        extern void stackchan_arm_chat_output();
++        stackchan_arm_chat_output();
++        SetDeviceState(kDeviceStateSpeaking);
++        SendMcpMessage(json);
++        cJSON_free(json);
++    }
++    cJSON_Delete(response);
++}
++#endif
++
 +void Application::SendChatText(const std::string& text) {
 +    if (!protocol_ || GetDeviceState() != kDeviceStateIdle) {
 +        ESP_LOGW(TAG, "USB chat unavailable or busy");
@@ -201,24 +658,35 @@ index 31de205..da9a598 100644
 +    stackchan_arm_chat_output();
 +    protocol_->SendWakeWordDetected(text);
 +    ESP_LOGI(TAG, "USB chat text submitted");
-+}
-+
+ }
+ 
  void Application::WakeWordInvoke(const std::string& wake_word) {
-     if (!protocol_) {
-         return;
 diff --git a/main/application.h b/main/application.h
-index f2b9a00..2528131 100644
 --- a/main/application.h
 +++ b/main/application.h
-@@ -109,6 +109,7 @@ public:
+@@ -1,5 +1,7 @@
+ #ifndef _APPLICATION_H_
+ #define _APPLICATION_H_
++
++#include <atomic>
+ 
+ #include <freertos/FreeRTOS.h>
+ #include <freertos/event_groups.h>
+@@ -109,6 +111,13 @@
      void StopListening();
  
      void Reboot();
 +    void SendChatText(const std::string& text);
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE_USB
++    void CompleteCodexTask(int request_id, const std::string& text);
++    void UpdateCodexProgress(int job_id, int sequence, const std::string& text);
++    void CompleteThetaQuery(int job_id, const std::string& text, bool is_error);
++    void CompleteFutuQuery(int job_id, const std::string& text, bool is_error);
++#endif
      void WakeWordInvoke(const std::string& wake_word);
      bool UpgradeFirmware(const std::string& url, const std::string& version = "");
      bool CanEnterSleepMode();
-@@ -116,6 +117,7 @@ public:
+@@ -116,6 +125,7 @@
      void RegisterMcpBroadcastCallback(std::function<void(const std::string&)> callback);
      void SetAecMode(AecMode mode);
      AecMode GetAecMode() const { return aec_mode_; }
@@ -226,7 +694,40 @@ index f2b9a00..2528131 100644
      void PlaySound(const std::string_view& sound);
      AudioService& GetAudioService() { return audio_service_; }
      
-@@ -169,7 +171,6 @@ private:
+@@ -135,6 +145,32 @@
+     std::unique_ptr<Protocol> protocol_;
+     EventGroupHandle_t event_group_ = nullptr;
+     esp_timer_handle_t clock_timer_handle_ = nullptr;
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE
++    int64_t command_listen_started_us_ = 0;
++    int64_t command_last_voice_us_ = 0;
++#ifdef CONFIG_STACKCHAN_CODEX_VOICE_USB
++    std::atomic_uint codex_audio_packets_{0};
++    void ReplyCodexStatus(int request_id);
++    void SendBridgeToolResult(int request_id, const char* text, bool is_error);
++    int theta_request_id_ = -1;
++    int theta_job_id_ = 0;
++    int64_t theta_deadline_us_ = 0;
++    int futu_request_id_ = -1;
++    int futu_job_id_ = 0;
++    int64_t futu_deadline_us_ = 0;
++    int codex_status_request_id_ = -1;
++    int64_t codex_status_deadline_us_ = 0;
++    std::string codex_task_result_;
++    std::string codex_task_progress_;
++    int codex_progress_sequence_ = 0;
++    bool codex_progress_unread_ = false;
++    bool codex_announce_pending_ = false;
++    int64_t codex_announce_deadline_us_ = 0;
++    int codex_request_id_ = 0;
++    std::atomic_bool codex_task_pending_{false};
++    std::atomic_bool codex_readback_{false};
++#endif
++#endif
+     DeviceStateMachine state_machine_;
+     ListeningMode listening_mode_ = kListeningModeAutoStop;
+     AecMode aec_mode_ = kAecOff;
+@@ -169,7 +205,6 @@
      void ContinueWakeWordInvoke(const std::string& wake_word);
      void StartListeningAudio();
      void ConfigureWakeWordForListening();
@@ -234,7 +735,7 @@ index f2b9a00..2528131 100644
      void StopNotification();
      void HandleNotificationFinished(uint32_t playback_id, bool success);
  
-@@ -180,7 +181,6 @@ private:
+@@ -180,7 +215,6 @@
      void CheckAssetsVersion();
      void CheckNewVersion();
      void InitializeProtocol();
@@ -243,10 +744,9 @@ index f2b9a00..2528131 100644
      ListeningMode GetDefaultListeningMode() const;
      
 diff --git a/main/audio/audio_service.cc b/main/audio/audio_service.cc
-index 7f7582b..34de3d6 100644
 --- a/main/audio/audio_service.cc
 +++ b/main/audio/audio_service.cc
-@@ -139,7 +139,7 @@ void AudioService::Start() {
+@@ -139,7 +139,7 @@
              audio_service->AudioOutputTask();
              vTaskDelete(NULL);
          },
@@ -255,7 +755,7 @@ index 7f7582b..34de3d6 100644
  #else
      /* Start the audio input task */
      xTaskCreate(
-@@ -157,7 +157,7 @@ void AudioService::Start() {
+@@ -157,7 +157,7 @@
              audio_service->AudioOutputTask();
              vTaskDelete(NULL);
          },
@@ -264,7 +764,7 @@ index 7f7582b..34de3d6 100644
  #endif
  
      /* Start the opus codec task */
-@@ -167,7 +167,7 @@ void AudioService::Start() {
+@@ -167,7 +167,7 @@
              audio_service->OpusCodecTask();
              vTaskDelete(NULL);
          },
@@ -273,16 +773,16 @@ index 7f7582b..34de3d6 100644
  }
  
  void AudioService::Stop() {
-@@ -239,6 +239,8 @@ bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, in
+@@ -238,6 +238,8 @@
+ 
      return true;
  }
- 
-+extern void stackchan_capture_audio(const int16_t* samples, size_t count, int channels);
 +
++extern void stackchan_capture_audio(const int16_t* samples, size_t count, int channels);
+ 
  void AudioService::AudioInputTask() {
      constexpr EventBits_t kAudioInputActiveBits = AS_EVENT_AUDIO_TESTING_RUNNING |
-                                                   AS_EVENT_WAKE_WORD_RUNNING |
-@@ -311,6 +313,7 @@ void AudioService::AudioInputTask() {
+@@ -311,6 +313,7 @@
              int samples = 160;  // 10ms
              std::vector<int16_t> data;
              if (ReadAudioData(data, 16000, samples)) {
@@ -290,7 +790,7 @@ index 7f7582b..34de3d6 100644
                  audio_engine_->Feed(std::move(data));
                  continue;
              }
-@@ -349,6 +352,8 @@ void AudioService::AudioOutputTask() {
+@@ -349,6 +352,8 @@
          }
  
          codec_->OutputData(task.pcm);
@@ -300,10 +800,9 @@ index 7f7582b..34de3d6 100644
          /* Update the last output time */
          last_output_time_ = std::chrono::steady_clock::now();
 diff --git a/main/audio/engines/afe_audio_engine.cc b/main/audio/engines/afe_audio_engine.cc
-index 3823d10..5cfcf79 100644
 --- a/main/audio/engines/afe_audio_engine.cc
 +++ b/main/audio/engines/afe_audio_engine.cc
-@@ -225,7 +225,7 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
+@@ -225,7 +225,7 @@
              engine->ProcessingTask();
              vTaskDelete(nullptr);
          },
@@ -313,7 +812,6 @@ index 3823d10..5cfcf79 100644
      if (processing_task_ == nullptr) {
          ESP_LOGE(TAG, "Failed to create AFE processing task, internal free=%u largest=%u",
 diff --git a/main/boards/common/esp_video.cc b/main/boards/common/esp_video.cc
-index 2f31a49..4cf6f63 100644
 --- a/main/boards/common/esp_video.cc
 +++ b/main/boards/common/esp_video.cc
 @@ -1,6 +1,7 @@
@@ -332,7 +830,7 @@ index 2f31a49..4cf6f63 100644
  
  #include "esp_imgfx_color_convert.h"
  #include "esp_video_device.h"
-@@ -389,6 +391,11 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
+@@ -389,6 +391,11 @@
  }
  
  EspVideo::~EspVideo() {
@@ -344,7 +842,7 @@ index 2f31a49..4cf6f63 100644
      if (streaming_on_ && video_fd_ >= 0) {
          int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
          ioctl(video_fd_, VIDIOC_STREAMOFF, &type);
-@@ -411,7 +418,10 @@ void EspVideo::SetExplainUrl(const std::string& url, const std::string& token) {
+@@ -411,7 +418,10 @@
      explain_token_ = token;
  }
  
@@ -356,7 +854,7 @@ index 2f31a49..4cf6f63 100644
      if (encoder_thread_.joinable()) {
          encoder_thread_.join();
      }
-@@ -422,7 +432,7 @@ bool EspVideo::Capture() {
+@@ -422,7 +432,7 @@
          return false;
      }
  
@@ -365,7 +863,7 @@ index 2f31a49..4cf6f63 100644
          struct v4l2_buffer buf = {};
          buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
          buf.memory = V4L2_MEMORY_MMAP;
-@@ -430,7 +440,7 @@ bool EspVideo::Capture() {
+@@ -430,7 +440,7 @@
              ESP_LOGE(TAG, "VIDIOC_DQBUF failed");
              return false;
          }
@@ -374,7 +872,7 @@ index 2f31a49..4cf6f63 100644
              // 保存帧副本到PSRAM
              if (frame_.data) {
                  heap_caps_free(frame_.data);
-@@ -773,6 +783,9 @@ bool EspVideo::Capture() {
+@@ -773,6 +783,9 @@
          }
      }
  
@@ -384,7 +882,7 @@ index 2f31a49..4cf6f63 100644
      // 显示预览图片
      auto display = Board::GetInstance().GetDisplay();
      if (display != nullptr) {
-@@ -943,6 +956,9 @@ bool EspVideo::SetVFlip(bool enabled) {
+@@ -943,6 +956,9 @@
   * @warning 如果摄像头缓冲区为空或网络连接失败，将返回错误信息
   */
  std::expected<std::string, std::string> EspVideo::Explain(const std::string& question) {
@@ -394,7 +892,7 @@ index 2f31a49..4cf6f63 100644
      if (explain_url_.empty()) {
          return std::unexpected("Image explain URL or token is not set");
      }
-@@ -954,41 +970,70 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
+@@ -954,41 +970,70 @@
          return std::unexpected("Failed to create JPEG queue");
      }
  
@@ -471,6 +969,14 @@ index 2f31a49..4cf6f63 100644
 -                return len;
 -            },
 -            jpeg_queue);
+-
+-        if (!ok) {
+-            JpegChunk chunk = {.data = nullptr, .len = 0};
+-            xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
+-        }
+-    });
+-
+-    auto drain_jpeg_queue = [this, jpeg_queue]() {
 +            }
 +        });
 +    } catch (const std::exception&) {
@@ -478,24 +984,18 @@ index 2f31a49..4cf6f63 100644
 +        log_memory("encoder_task_failed");
 +        return std::unexpected("Not enough memory to start the JPEG encoder");
 +    }
- 
--        if (!ok) {
--            JpegChunk chunk = {.data = nullptr, .len = 0};
--            xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
--        }
--    });
++
 +    // The pinned encoder emits one complete JPEG and an end marker. Its queue
 +    // cannot fill before join. Reclaim codec scratch space and the task stack
 +    // before TCP allocates its receive task from internal RAM.
 +    encoder_thread_.join();
 +    log_memory("encode_done");
- 
--    auto drain_jpeg_queue = [this, jpeg_queue]() {
++
 +    auto drain_jpeg_queue = [jpeg_queue]() {
          JpegChunk chunk;
          while (xQueueReceive(jpeg_queue, &chunk, portMAX_DELAY) == pdPASS) {
              if (chunk.data != nullptr) {
-@@ -997,12 +1042,24 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
+@@ -997,12 +1042,24 @@
                  break;
              }
          }
@@ -521,7 +1021,7 @@ index 2f31a49..4cf6f63 100644
      // 构造multipart/form-data请求体
      std::string boundary = "----ESP32_CAMERA_BOUNDARY";
  
-@@ -1016,13 +1073,15 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
+@@ -1016,13 +1073,15 @@
      http->SetHeader("Transfer-Encoding", "chunked");
      if (auto opened = http->Open("POST", explain_url_); !opened) {
          ESP_LOGE(TAG, "Failed to connect to explain URL: %s", opened.error().ToString().c_str());
@@ -539,7 +1039,7 @@ index 2f31a49..4cf6f63 100644
              return true;
          }
          return false;
-@@ -1077,8 +1136,6 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
+@@ -1077,8 +1136,6 @@
          }
          total_sent += chunk.len;
      }
@@ -548,7 +1048,7 @@ index 2f31a49..4cf6f63 100644
      // 清理队列
      vQueueDelete(jpeg_queue);
  
-@@ -1114,14 +1171,26 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
+@@ -1114,14 +1171,26 @@
          return std::unexpected("Failed to upload photo");
      }
  
@@ -585,7 +1085,6 @@ index 2f31a49..4cf6f63 100644
 +    return std::unexpected("Image service response timed out");
  }
 diff --git a/main/boards/common/esp_video.h b/main/boards/common/esp_video.h
-index f36d26a..0f3f383 100644
 --- a/main/boards/common/esp_video.h
 +++ b/main/boards/common/esp_video.h
 @@ -3,6 +3,7 @@
@@ -596,7 +1095,7 @@ index f36d26a..0f3f383 100644
  #include <thread>
  #include <vector>
  
-@@ -19,7 +20,7 @@ struct JpegChunk {
+@@ -19,7 +20,7 @@
  };
  
  class EspVideo : public Camera {
@@ -605,7 +1104,7 @@ index f36d26a..0f3f383 100644
      struct FrameBuffer {
          uint8_t* data = nullptr;
          size_t len = 0;
-@@ -27,6 +28,10 @@ private:
+@@ -27,6 +28,10 @@
          uint16_t height = 0;
          v4l2_pix_fmt_t format = 0;
      } frame_;
@@ -617,10 +1116,9 @@ index f36d26a..0f3f383 100644
  #ifdef CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
      uint16_t sensor_width_ = 0;
 diff --git a/main/boards/common/i2c_device.cc b/main/boards/common/i2c_device.cc
-index 9d1ff25..a94807f 100644
 --- a/main/boards/common/i2c_device.cc
 +++ b/main/boards/common/i2c_device.cc
-@@ -52,3 +52,7 @@ esp_err_t I2cDevice::ResetBus(const char* reason) {
+@@ -52,3 +52,7 @@
      ESP_LOGW(TAG, "Resetting I2C bus: %s", reason ? reason : "unspecified");
      return i2c_master_bus_reset(i2c_bus_);
  }
@@ -629,10 +1127,9 @@ index 9d1ff25..a94807f 100644
 +    return i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, 100);
 +}
 diff --git a/main/boards/common/i2c_device.h b/main/boards/common/i2c_device.h
-index f20185a..2c339f8 100644
 --- a/main/boards/common/i2c_device.h
 +++ b/main/boards/common/i2c_device.h
-@@ -15,6 +15,7 @@ protected:
+@@ -15,6 +15,7 @@
      void WriteReg(uint8_t reg, uint8_t value);
      void WriteRegs(uint8_t reg, const uint8_t* buffer, size_t length);
      uint8_t ReadReg(uint8_t reg);
@@ -641,7 +1138,6 @@ index f20185a..2c339f8 100644
      esp_err_t ResetBus(const char* reason);
  };
 diff --git a/main/boards/common/wifi_board.cc b/main/boards/common/wifi_board.cc
-index 5b3721d..88bc4b6 100644
 --- a/main/boards/common/wifi_board.cc
 +++ b/main/boards/common/wifi_board.cc
 @@ -11,6 +11,7 @@
@@ -652,7 +1148,7 @@ index 5b3721d..88bc4b6 100644
  #include <utility>
  
  #include <material_symbols.h>
-@@ -52,6 +53,20 @@ std::string WifiBoard::GetBoardType() {
+@@ -52,6 +53,20 @@
  void WifiBoard::StartNetwork() {
      auto& wifi_manager = WifiManager::GetInstance();
  
@@ -673,7 +1169,7 @@ index 5b3721d..88bc4b6 100644
      // Initialize WiFi manager
      WifiManagerConfig config;
      config.ssid_prefix = "Xiaozhi";
-@@ -283,7 +298,12 @@ void WifiBoard::SetPowerSaveLevel(PowerSaveLevel level) {
+@@ -283,7 +298,12 @@
      WifiPowerSaveLevel wifi_level;
      switch (level) {
          case PowerSaveLevel::LOW_POWER:
@@ -687,10 +1183,9 @@ index 5b3721d..88bc4b6 100644
          case PowerSaveLevel::BALANCED:
              wifi_level = WifiPowerSaveLevel::BALANCED;
 diff --git a/main/boards/common/wifi_board.h b/main/boards/common/wifi_board.h
-index 7ee973c..8de99db 100644
 --- a/main/boards/common/wifi_board.h
 +++ b/main/boards/common/wifi_board.h
-@@ -29,7 +29,7 @@ protected:
+@@ -29,7 +29,7 @@
      /**
       * Enter WiFi configuration mode
       */
@@ -700,7 +1195,6 @@ index 7ee973c..8de99db 100644
      /**
       * WiFi connection timeout callback
 diff --git a/main/boards/m5stack/core-s3/cores3_audio_codec.cc b/main/boards/m5stack/core-s3/cores3_audio_codec.cc
-index 84c4af6..97339c3 100644
 --- a/main/boards/m5stack/core-s3/cores3_audio_codec.cc
 +++ b/main/boards/m5stack/core-s3/cores3_audio_codec.cc
 @@ -1,20 +1,24 @@
@@ -733,7 +1227,7 @@ index 84c4af6..97339c3 100644
  
      CreateDuplexChannels(mclk, bclk, ws, dout, din);
  
-@@ -194,7 +198,7 @@ void CoreS3AudioCodec::EnableInput(bool enable) {
+@@ -194,7 +198,7 @@
      if (enable) {
          esp_codec_dev_sample_info_t fs = {
              .bits_per_sample = 16,
@@ -742,7 +1236,7 @@ index 84c4af6..97339c3 100644
              .channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
              .sample_rate = (uint32_t)output_sample_rate_,
              .mclk_multiple = 0,
-@@ -215,9 +219,9 @@ void CoreS3AudioCodec::EnableOutput(bool enable) {
+@@ -215,9 +219,9 @@
          return;
      }
      if (enable) {
@@ -754,12 +1248,15 @@ index 84c4af6..97339c3 100644
              .channel = 1,
              .channel_mask = 0,
              .sample_rate = (uint32_t)output_sample_rate_,
-@@ -239,8 +243,24 @@ int CoreS3AudioCodec::Read(int16_t* dest, int samples) {
+@@ -239,8 +243,24 @@
  }
  
  int CoreS3AudioCodec::Write(const int16_t* data, int samples) {
 -    if (output_enabled_) {
 -        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_write(output_dev_, (void*)data, samples * sizeof(int16_t)));
+-    }
+-    return samples;
+-}
 +    if (!output_enabled_ || samples <= 0)
 +        return 0;
 +
@@ -778,15 +1275,13 @@ index 84c4af6..97339c3 100644
 +            return written;
 +        }
 +        written += count;
-     }
--    return samples;
++    }
 +    return written;
- }
++}
 diff --git a/main/boards/m5stack/core-s3/cores3_audio_codec.h b/main/boards/m5stack/core-s3/cores3_audio_codec.h
-index 4b034b4..1028e73 100644
 --- a/main/boards/m5stack/core-s3/cores3_audio_codec.h
 +++ b/main/boards/m5stack/core-s3/cores3_audio_codec.h
-@@ -25,8 +25,9 @@ private:
+@@ -25,8 +25,9 @@
  
  public:
      CoreS3AudioCodec(void* i2c_master_handle, int input_sample_rate, int output_sample_rate,
@@ -799,10 +1294,9 @@ index 4b034b4..1028e73 100644
  
      virtual void SetOutputVolume(int volume) override;
 diff --git a/main/display/display.h b/main/display/display.h
-index e7fa6fa..537d1d0 100644
 --- a/main/display/display.h
 +++ b/main/display/display.h
-@@ -50,6 +50,8 @@ public:
+@@ -50,6 +50,8 @@
      virtual Theme* GetTheme() { return current_theme_; }
      virtual void UpdateStatusBar(bool update_all = false);
      virtual void SetPowerSaveMode(bool on);
@@ -811,11 +1305,43 @@ index e7fa6fa..537d1d0 100644
      virtual bool AddTextGlyphs(const std::vector<TextGlyph>& glyphs, uint8_t bpp) { return false; }
      virtual void ClearTextGlyphs() {}
      virtual void SetEmojiCollection(std::shared_ptr<EmojiCollection>) {}
+diff --git a/main/notify/notify_player.cc b/main/notify/notify_player.cc
+--- a/main/notify/notify_player.cc
++++ b/main/notify/notify_player.cc
+@@ -6,6 +6,8 @@
+ #include <memory>
+ 
+ #include <esp_log.h>
++#include <esp_heap_caps.h>
++#include <freertos/idf_additions.h>
+ 
+ #include "board.h"
+ #include "http.h"
+@@ -62,8 +64,9 @@
+         completion_reported_ = false;
+     }
+ 
+-    BaseType_t created = xTaskCreate(WorkerEntry, "notify_http", kNotifyTaskStackSize, this,
+-                                     kNotifyTaskPriority, &task_handle_);
++    BaseType_t created = xTaskCreateWithCaps(WorkerEntry, "notify_http", kNotifyTaskStackSize, this,
++                                             kNotifyTaskPriority, &task_handle_,
++                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+     if (created != pdPASS) {
+         ESP_LOGE(TAG, "Failed to create notification HTTP task");
+         std::lock_guard<std::mutex> lock(mutex_);
+@@ -168,7 +171,7 @@
+ void NotifyPlayer::WorkerEntry(void* arg) {
+     auto* player = static_cast<NotifyPlayer*>(arg);
+     player->WorkerTask();
+-    vTaskDelete(nullptr);
++    vTaskDeleteWithCaps(nullptr);
+ }
+ 
+ void NotifyPlayer::WorkerTask() {
 diff --git a/main/ota.cc b/main/ota.cc
-index 124d333..bae8497 100644
 --- a/main/ota.cc
 +++ b/main/ota.cc
-@@ -84,7 +84,7 @@ std::unique_ptr<Http> Ota::SetupHttp() {
+@@ -84,7 +84,7 @@
  /* 
   * Specification: https://ccnphfhqs21z.feishu.cn/wiki/FjW6wZmisimNBBkov6OcmfvknVd
   */
@@ -824,7 +1350,7 @@ index 124d333..bae8497 100644
      auto& board = Board::GetInstance();
      auto app_desc = esp_app_get_description();
  
-@@ -132,19 +132,12 @@ NetworkResult<> Ota::CheckVersion() {
+@@ -132,19 +132,12 @@
          return std::unexpected(NetworkError::ProtocolError());
      }
  
@@ -847,7 +1373,7 @@ index 124d333..bae8497 100644
          cJSON* challenge = cJSON_GetObjectItem(activation, "challenge");
          if (cJSON_IsString(challenge)) {
              activation_challenge_ = challenge->valuestring;
-@@ -225,7 +218,7 @@ NetworkResult<> Ota::CheckVersion() {
+@@ -225,7 +218,7 @@
  
      has_new_version_ = false;
      cJSON *firmware = cJSON_GetObjectItem(root, "firmware");
@@ -856,7 +1382,7 @@ index 124d333..bae8497 100644
          cJSON *version = cJSON_GetObjectItem(firmware, "version");
          if (cJSON_IsString(version)) {
              firmware_version_ = version->valuestring;
-@@ -249,7 +242,7 @@ NetworkResult<> Ota::CheckVersion() {
+@@ -249,7 +242,7 @@
                  has_new_version_ = true;
              }
          }
@@ -866,10 +1392,9 @@ index 124d333..bae8497 100644
      }
  
 diff --git a/main/ota.h b/main/ota.h
-index eda3fd7..67ced98 100644
 --- a/main/ota.h
 +++ b/main/ota.h
-@@ -15,13 +15,15 @@ public:
+@@ -15,13 +15,15 @@
      Ota();
      ~Ota();
  
@@ -887,7 +1412,7 @@ index eda3fd7..67ced98 100644
      bool HasServerTime() { return has_server_time_; }
      bool StartUpgrade(std::function<void(int progress, size_t speed)> callback);
      static bool Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback);
-@@ -30,18 +32,14 @@ public:
+@@ -30,18 +32,14 @@
      const std::string& GetFirmwareVersion() const { return firmware_version_; }
      const std::string& GetCurrentVersion() const { return current_version_; }
      const std::string& GetFirmwareUrl() const { return firmware_url_; }
@@ -908,7 +1433,6 @@ index eda3fd7..67ced98 100644
      bool has_activation_challenge_ = false;
      std::string current_version_;
 diff --git a/main/protocols/mqtt_protocol.cc b/main/protocols/mqtt_protocol.cc
-index 75c4209..af6b240 100644
 --- a/main/protocols/mqtt_protocol.cc
 +++ b/main/protocols/mqtt_protocol.cc
 @@ -1,13 +1,17 @@
@@ -929,7 +1453,7 @@ index 75c4209..af6b240 100644
  #include <system_error>
  #include "assets/lang_config.h"
  
-@@ -167,7 +171,10 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
+@@ -167,7 +171,10 @@
      } else {
          broker_address = endpoint;
      }
@@ -941,7 +1465,7 @@ index 75c4209..af6b240 100644
      if (Board::GetInstance().GetBoardType() == "wifi") {
          struct hostent* server = gethostbyname(broker_address.c_str());
          if (server != nullptr && server->h_addr != nullptr) {
-@@ -177,9 +184,19 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
+@@ -177,9 +184,19 @@
              ESP_LOGW(TAG, "Failed to resolve MQTT host %s", broker_address.c_str());
          }
      }
@@ -964,89 +1488,24 @@ index 75c4209..af6b240 100644
          SetError(Lang::Strings::SERVER_NOT_CONNECTED,
                   broker_address + ":" + std::to_string(broker_port));
          return false;
-@@ -373,6 +390,13 @@ bool MqttProtocol::OpenAudioChannel() {
+@@ -372,6 +389,13 @@
+         ESP_LOGE(TAG, "Failed to connect UDP audio channel: %s",
                   connected.error().ToString().c_str());
          return false;
-     }
++    }
 +    // EspUdp starts its receive task at priority 1. During voice playback that
 +    // lets display work delay incoming 20 ms audio datagrams until lwIP drops
 +    // them. The task blocks in recv() between packets, so a higher priority
 +    // does not consume CPU while idle.
 +    if (TaskHandle_t receive_task = xTaskGetHandle("udp_receive")) {
 +        vTaskPrioritySet(receive_task, 7);
-+    }
+     }
      {
          std::lock_guard<std::mutex> lock(channel_mutex_);
-         udp_ = std::move(udp);
-diff --git a/main/system_info.cc b/main/system_info.cc
-index c4a6077..93ca32a 100644
---- a/main/system_info.cc
-+++ b/main/system_info.cc
-@@ -9,6 +9,7 @@
- #include <esp_app_desc.h>
- #include <esp_ota_ops.h>
- #include <esp_pm.h>
-+#include <esp_heap_caps.h>
- #if CONFIG_IDF_TARGET_ESP32P4 && !CONFIG_XIAOZHI_NETWORK_ETHERNET
- #include "esp_wifi_remote.h"
- #endif
-@@ -148,9 +149,14 @@ void SystemInfo::PrintTaskList() {
- }
- 
- void SystemInfo::PrintHeapStats() {
--    int free_sram = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
--    int min_free_sram = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
--    ESP_LOGI(TAG, "free sram: %u minimal sram: %u", free_sram, min_free_sram);
-+    ESP_LOGI(TAG, "internal free=%u min=%u largest=%u",
-+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
-+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-+    ESP_LOGI(TAG, "spiram free=%u min=%u largest=%u",
-+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM),
-+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
- }
- 
- void SystemInfo::PrintPmLocks() {
-diff --git a/main/notify/notify_player.cc b/main/notify/notify_player.cc
-index 312bc96..4a8acd8 100644
---- a/main/notify/notify_player.cc
-+++ b/main/notify/notify_player.cc
-@@ -6,6 +6,8 @@
- #include <memory>
- 
- #include <esp_log.h>
-+#include <esp_heap_caps.h>
-+#include <freertos/idf_additions.h>
- 
- #include "board.h"
- #include "http.h"
-@@ -62,8 +64,9 @@ bool NotifyPlayer::Start(std::string audio_url, std::vector<NotifySubtitle> subt
-         completion_reported_ = false;
-     }
- 
--    BaseType_t created = xTaskCreate(WorkerEntry, "notify_http", kNotifyTaskStackSize, this,
--                                     kNotifyTaskPriority, &task_handle_);
-+    BaseType_t created = xTaskCreateWithCaps(WorkerEntry, "notify_http", kNotifyTaskStackSize, this,
-+                                             kNotifyTaskPriority, &task_handle_,
-+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-     if (created != pdPASS) {
-         ESP_LOGE(TAG, "Failed to create notification HTTP task");
-         std::lock_guard<std::mutex> lock(mutex_);
-@@ -168,7 +171,7 @@ void NotifyPlayer::OnPlaybackDrained() {
- void NotifyPlayer::WorkerEntry(void* arg) {
-     auto* player = static_cast<NotifyPlayer*>(arg);
-     player->WorkerTask();
--    vTaskDelete(nullptr);
-+    vTaskDeleteWithCaps(nullptr);
- }
- 
- void NotifyPlayer::WorkerTask() {
 diff --git a/main/protocols/protocol.cc b/main/protocols/protocol.cc
-index ac591b5..279a1f9 100644
 --- a/main/protocols/protocol.cc
 +++ b/main/protocols/protocol.cc
-@@ -73,10 +73,18 @@ void Protocol::SendAbortSpeaking(AbortReason reason) {
+@@ -73,10 +73,18 @@
  }
  
  void Protocol::SendWakeWordDetected(const std::string& wake_word) {
@@ -1069,3 +1528,32 @@ index ac591b5..279a1f9 100644
  }
  
  void Protocol::SendStartListening(ListeningMode mode) {
+diff --git a/main/system_info.cc b/main/system_info.cc
+--- a/main/system_info.cc
++++ b/main/system_info.cc
+@@ -9,6 +9,7 @@
+ #include <esp_app_desc.h>
+ #include <esp_ota_ops.h>
+ #include <esp_pm.h>
++#include <esp_heap_caps.h>
+ #if CONFIG_IDF_TARGET_ESP32P4 && !CONFIG_XIAOZHI_NETWORK_ETHERNET
+ #include "esp_wifi_remote.h"
+ #endif
+@@ -148,9 +149,14 @@
+ }
+ 
+ void SystemInfo::PrintHeapStats() {
+-    int free_sram = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+-    int min_free_sram = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+-    ESP_LOGI(TAG, "free sram: %u minimal sram: %u", free_sram, min_free_sram);
++    ESP_LOGI(TAG, "internal free=%u min=%u largest=%u",
++             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
++             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
++             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
++    ESP_LOGI(TAG, "spiram free=%u min=%u largest=%u",
++             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
++             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM),
++             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+ }
+ 
+ void SystemInfo::PrintPmLocks() {

@@ -17,6 +17,7 @@
 #include <nvs_flash.h>
 #include <driver/gpio.h>
 #include <driver/usb_serial_jtag.h>
+#include <freertos/idf_additions.h>
 #include <esp_event.h>
 #include <application.h>
 #include <cJSON.h>
@@ -148,6 +149,59 @@ static void usb_speech_task(void*)
                 if (!overflow && line.size() == 18 && line.starts_with("STACKCHAN_RECORD ") &&
                     line.back() >= '1' && line.back() <= '9') {
                     usb_record(line.back() - '0');
+#ifdef CONFIG_STACKCHAN_CODEX_VOICE_USB
+                } else if (!overflow && line.starts_with("STACKCHAN_THETA_RESULT ")) {
+                    auto* result = cJSON_Parse(line.c_str() + strlen("STACKCHAN_THETA_RESULT "));
+                    auto* id = cJSON_GetObjectItem(result, "id");
+                    auto* ok = cJSON_GetObjectItem(result, "ok");
+                    auto* text = cJSON_GetObjectItem(result, "text");
+                    if (cJSON_IsNumber(id) && cJSON_IsBool(ok) && cJSON_IsString(text)) {
+                        Application::GetInstance().Schedule(
+                            [job_id = id->valueint, text = std::string(text->valuestring), error = !cJSON_IsTrue(ok)]() {
+                                Application::GetInstance().CompleteThetaQuery(job_id, text, error);
+                            });
+                    }
+                    cJSON_Delete(result);
+                } else if (!overflow && line.starts_with("STACKCHAN_FUTU_RESULT ")) {
+                    auto* result = cJSON_Parse(line.c_str() + strlen("STACKCHAN_FUTU_RESULT "));
+                    auto* id = cJSON_GetObjectItem(result, "id");
+                    auto* ok = cJSON_GetObjectItem(result, "ok");
+                    if (cJSON_IsNumber(id) && cJSON_IsBool(ok)) {
+                        if (auto* json = cJSON_PrintUnformatted(result)) {
+                            Application::GetInstance().Schedule(
+                                [job_id = id->valueint, text = std::string(json), error = !cJSON_IsTrue(ok)]() {
+                                    Application::GetInstance().CompleteFutuQuery(job_id, text, error);
+                                });
+                            cJSON_free(json);
+                        }
+                    }
+                    cJSON_Delete(result);
+                } else if (!overflow && line.starts_with("STACKCHAN_CODEX_PROGRESS ")) {
+                    auto* result = cJSON_Parse(line.c_str() + strlen("STACKCHAN_CODEX_PROGRESS "));
+                    auto* id = cJSON_GetObjectItem(result, "id");
+                    auto* sequence = cJSON_GetObjectItem(result, "seq");
+                    auto* text = cJSON_GetObjectItem(result, "text");
+                    if (cJSON_IsNumber(id) && cJSON_IsNumber(sequence) && cJSON_IsString(text) &&
+                        strlen(text->valuestring) <= 600) {
+                        Application::GetInstance().Schedule(
+                            [job_id = id->valueint, seq = sequence->valueint,
+                             update = std::string(text->valuestring)]() {
+                                Application::GetInstance().UpdateCodexProgress(job_id, seq, update);
+                            });
+                    }
+                    cJSON_Delete(result);
+                } else if (!overflow && line.starts_with("STACKCHAN_CODEX_RESULT ")) {
+                    auto* result = cJSON_Parse(line.c_str() + strlen("STACKCHAN_CODEX_RESULT "));
+                    auto* id = cJSON_GetObjectItem(result, "id");
+                    auto* text = cJSON_GetObjectItem(result, "text");
+                    if (cJSON_IsNumber(id) && cJSON_IsString(text)) {
+                        Application::GetInstance().Schedule(
+                            [request_id = id->valueint, summary = std::string(text->valuestring)]() {
+                                Application::GetInstance().CompleteCodexTask(request_id, summary);
+                            });
+                    }
+                    cJSON_Delete(result);
+#endif
                 } else if (!overflow && line.starts_with("STACKCHAN_CHAT ")) {
                     const auto* payload = line.c_str() + sizeof("STACKCHAN_CHAT ") - 1;
                     auto* decoded = cJSON_ParseWithOpts(payload, nullptr, true);
@@ -276,7 +330,10 @@ void start_xiaozhi_app()
     app.Initialize();
     usb_serial_jtag_driver_config_t usb_config = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     if (usb_serial_jtag_driver_install(&usb_config) != ESP_OK ||
-        xTaskCreate(usb_speech_task, "usb_speech", 4096, nullptr, 2, nullptr) != pdPASS) {
+        // Keep internal RAM available for the UDP receive task. This reader
+        // only parses USB messages and schedules app work; it never writes flash.
+        xTaskCreateWithCaps(usb_speech_task, "usb_speech", 4096, nullptr, 6, nullptr,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGW(_tag, "USB speech unavailable");
     }
     app.Run();  // This function runs the main event loop and never returns
