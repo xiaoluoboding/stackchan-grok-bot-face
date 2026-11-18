@@ -17,7 +17,9 @@
 
 这些行为已在一台 M5Stack StackChan（ESP32-S3、16 MB Flash、8 MB PSRAM）上验证：设备连接 Wi-Fi 和语音服务后，能够用“你好小智”唤醒并正常回复，待机时头部不再自动摆动。不同网络和设备上的效果仍应自行验证。
 
-## 本地行情与标的分析
+## 语音下达 Codex 任务
+
+Grok Bot 固件沿用小智服务的听写和原有音色，通过 USB 将语音任务交给 Mac 上的 Codex，完成后用原来的声音播报结果。Firecrawl 等 MCP 服务由 Codex 加载。Grok Bot 接入方式见 [固件配置](firmware/README.md#codex-语音模式)。
 
 USB 桥接还支持 `self.futu.execute`：直接查询 Mac 上已登录的 OpenD，取得股票行情快照，
 由小智简短播报价格和涨跌幅。对机器人说「用富途查询腾讯控股的行情」即可。

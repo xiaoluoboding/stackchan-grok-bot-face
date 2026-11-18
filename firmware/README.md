@@ -63,24 +63,83 @@ CHROME_BIN=/path/to/chrome SIZE=200 node tools/grokbot/bake.mjs
 已在一台 M5Stack StackChan 上确认：Wi-Fi 获取地址、MQTT/TLS 连接、语音服务激活、WakeNet 唤醒、正常对话，以及待机头部不再自动摆动。其他网络环境、服务端部署和全部上游应用功能尚需分别验证。
 
 
-## USB 本地工具
+## Codex 语音模式
 
-启用以下固件选项并构建、刷入应用，用 USB 连接 StackChan 和 Mac，保留小智原音色播报：
+Grok Bot 保持连接原小智语音服务，保留账号中配置的音色。设备向小智注册 `self.codex.execute` MCP 工具，工具调用通过 USB
+发送给 Mac，Mac 用常驻 Codex app-server 在指定项目里执行任务。提交工具会立即返回任务编号，
+小智通过 `self.codex.result` 每次最多等待八秒来查询进度，完成后用原音色播报。
+执行时，桥接程序读取 SDK 的事件流，将 Codex 面向用户的 `commentary` 和工具开始事件
+作为进度送回设备；不会转发内部推理、原始命令参数或工具输出。
+`self.codex.result` 在新进度到达时提前返回 `status=progress`，携带 `summary`、
+`progress_seq` 和 `read_aloud=true`，语音服务先简短播报，再继续查询；只有
+`status=running` 表示静默等待。两者分开，避免把实际进度当作普通轮询而跳过。
+进度最多每十二秒发送一条，中间更新合并为最新一条，不积压播报队列；完成结果优先，
+会取消尚未发出的进度。任务没有新事件时不会编造状态或百分比。
+收到 Codex 的具体步骤说明后，通用的“正在执行命令”等工具状态不再覆盖这类说明。
+语音会话结束后，任务继续在 Mac 上执行。结果返回时，固件用短通知重新接通语音服务，
+通过 MCP 取回结果并自动播报。
+任务结果会保留到下一次任务或设备重启，会话断开后可以重新唤醒并问「Codex 任务结果是什么」。
+任务运行期间仍可唤醒机器人查询进度。
+USB 进度包为 `STACKCHAN_CODEX_PROGRESS {"id":任务编号,"seq":递增序号,"text":"简短进度"}`。
+固件只接收当前运行任务的新序号；完成后的进度不会覆盖结果。会话断开时，最新进度也会
+通过短通知重新接通原语音服务，网络和语音合成本身仍会引入延迟。
+
+在 `sdkconfig.defaults.local` 配置以下选项，并在已有 `sdkconfig` 中通过
+`idf.py menuconfig` 确认实际值：
 
 ~~~text
+CONFIG_OTA_URL="https://api.tenclass.net/xiaozhi/ota/"
 CONFIG_STACKCHAN_CODEX_VOICE=y
 CONFIG_STACKCHAN_CODEX_VOICE_USB=y
 ~~~
 
-Mac 需要 Python 3.11+。在仓库根目录运行桥接，串口由该进程独占：
+构建并刷入应用后，用数据线连接机器人和 Mac。桥接程序需要 Python 3.11 或更新版本，
+使用本仓库的 `tools/codex/session.py` 常驻运行 Codex app-server，复用项目上下文和 MCP
+连接。启动时在后台预热一次，日志出现 `Ready` 后 Codex 会话已就绪；富途查询不必等待预热。在本仓库根目录启动：
 
 ~~~bash
 uv run --with pyserial --with openai-codex==0.170.0 --with futu-api python tools/codex/bridge.py \
   --port /dev/cu.usbmodem1101 --project "$PWD"
 ~~~
 
-公共桥接同时提供 Codex 任务执行、进度和结果回执。`--project` 指定本机已登录 Codex 的
-工作目录；会话使用 workspace-write。富途和 ThetaPilot 请求独立执行，无需等待 Codex 预热。
+将串口改成当前设备路径，`--project` 指向需要 Codex 操作的项目目录。桥接程序需要
+独占串口，请关闭其他串口监视器。Codex 会话使用 `workspace-write`，可以根据语音指令
+修改目标项目。网关和转写服务的 OpenAI API Key 在 USB 模式中不参与链路。
+
+对机器人说「你好小智」，等提示音后说「请让 Codex 查看当前项目分支，完成后告诉我分支名」。
+日志应依次出现 `CodexVoice: TASK`、`Codex task started`、
+`Codex task completed`、`CodexVoice: RESULT` 和
+`Speech audio delivered to speaker`。播报由原小智服务生成，该服务可能调整结果措辞。
+
+2026-11-18 已实机验证声音指令「查询当前项目的版本控制分支」经 MCP 交给 Codex，
+返回 `feat/stackchan-codex-voice`，机器人用原音色完整播报并回到待机，听感由用户确认。
+早期每次启动 CLI 的该次 Codex 执行约 45 秒。返回结果前会刷新 UDP 音频通道，并主动进入播放状态，
+兼容小智在 MCP 工具结果后继续同一轮 TTS 的行为。
+
+同日切换常驻会话后，用 Mac 的 Tingting 语音唤醒并下达分支查询，连续两轮实机计时如下。
+起点为 `say` 进程结束，播报起点以设备 `Speech audio delivered to speaker` 日志为准，
+并非麦克风声学测量；两轮 USB 结果均收到设备存储回执，播报结束后回到待机。
+
+| 分支查询 | 首次接收反馈 | Codex 执行 | 开始播报结果 |
+| --- | --- | --- | --- |
+| 第一轮（识别为查询所有分支） | 3.23 秒 | 5.65 秒 | 9.43 秒 |
+| 第二轮（仅当前分支） | 3.57 秒 | 5.16 秒 | 8.95 秒 |
+
+这些是两次预热后的简单查询记录，不代表复杂任务或网络搜索的完成时间。
+语音识别、云端工具选择和原音色合成仍占用约四秒，完整通路尚非即时响应。
+
+同日已实机验证执行中播报：语音请求检查项目分支并运行桥接单元测试，Codex 执行
+56.35 秒，期间设备收到七条进度更新，原语音服务播报检查项目、执行命令、处理依赖
+缓存限制、开始测试等状态，随后读取最终测试结果并回到待机。用户确认进度和结果均
+听到。该轮包含依赖环境查找耗时，进度播报并不缩短任务执行时间。
+
+随后发现 `running + progress` 在新会话中可能被语音服务静默忽略，且泛化工具状态
+可能覆盖具体步骤。已改为独立的 `status=progress` 和播报提示，并保留具体步骤说明。
+修复后实机运行单元测试，设备先播报“确认项目的测试入口，然后运行单元测试”，
+再播报 71 项测试通过的结果并回到待机，用户确认进度和结果均听到；最短间隔仍为十二秒。
+
+Firecrawl 等其他 MCP 服务在同一用户的 Codex 配置里启用，新增工具无需修改固件。
+相邻网关仓库的 `AUTO_CONVERSATION.md` 提供 Firecrawl 配置示例。
 
 ### ThetaPilot 标的分析
 
@@ -310,3 +369,10 @@ python3 tools/codex/flomo_notes.py '{"action":"create","text":"StackChan 接入�
 - 已创建两条标注为测试的笔记；未读取、修改或删除既有笔记。正文及 `#标签` 的
   API 原样传递、写入不自动重试、USB 消息边界和缺少读取凭据时的行为均有离线回归测试。
 - 无 MCP Token 的真实搜索调用返回明确的权限配置说明，没有伪造读取结果。
+
+### WebSocket 网关模式
+
+关闭 `CONFIG_STACKCHAN_CODEX_VOICE_USB` 后，也可以使用相邻 `stackchan-mcp`
+的自动语音网关。由配置服务向固件下发 WebSocket URL 和 token，并启用网关的
+`STACKCHAN_AUTO_BACKEND=codex`。此模式使用网关的 STT 和 TTS，播报音色由网关选择。
+自动录音在检测到人声后静音约两秒收尾，单轮最长十五秒，播报结束后回到待机。
