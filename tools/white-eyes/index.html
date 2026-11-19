@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StackChan · 白眼实验室</title>
+<style>
+:root{color-scheme:dark;font-family:'Avenir Next','PingFang SC',sans-serif;color:#eeeae2;background:#171918}*{box-sizing:border-box}body{margin:0}main{max-width:1100px;margin:auto;padding:48px 40px}.top{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #41453e;padding-bottom:20px}.mono{font-family:ui-monospace,monospace;font-size:11px;letter-spacing:.14em;color:#adb4a5}.tag{color:#c9e799}h1{font-size:42px;font-weight:500;letter-spacing:-.04em;margin:36px 0 12px}p{color:#aeb3ab;font-size:14px;line-height:1.9}.intro{max-width:600px;margin-bottom:30px}.compare{display:grid;grid-template-columns:1fr 1.25fr;gap:24px;align-items:start}.panel{border:1px solid #363b33;padding:18px;background:#1c1f1b}.label{display:flex;justify-content:space-between;margin-bottom:16px;font-size:12px;color:#b8bfb0}.stage{width:100%;aspect-ratio:1;background:#000;overflow:hidden;display:grid;place-items:center}.stage svg{width:100%;height:100%}.caption{margin:14px 0 0;font-size:12px}.new{border-color:#687c4d}.controls{padding-top:26px;display:grid;grid-template-columns:1fr 1fr;gap:22px}.states{display:flex;gap:8px;flex-wrap:wrap;grid-column:1/-1}button,select{font:inherit;font-size:12px;border:1px solid #4c5345;border-radius:4px;background:#22271e;color:#e4e8de;padding:10px 14px;cursor:pointer}button:hover{border-color:#c9e799}button[aria-pressed=true]{background:#c9e799;color:#202918;border-color:#c9e799}label{font-size:12px;color:#c4cabb}.slider{display:flex;align-items:center;gap:12px}.slider input{flex:1;min-width:50px;accent-color:#c9e799}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;grid-column:1/-1}select{max-width:200px}footer{border-top:1px solid #41453e;margin-top:32px;padding-top:18px;font-size:11px;color:#8c9584}a{color:#b4c99a}#new:fullscreen{width:100vw;height:100vh;aspect-ratio:auto;background:#000}#new:fullscreen svg{width:min(100vw,100vh);height:min(100vw,100vh)}body.face-only main{padding:0;max-width:none}body.face-only main>*:not(.compare){display:none}body.face-only .compare{display:block}body.face-only .panel:first-child,body.face-only .label,body.face-only .caption{display:none}body.face-only .new{padding:0;border:0}body.face-only #new{height:100dvh;width:100vw;aspect-ratio:auto}body.face-only #new svg{width:min(100vw,100dvh);height:min(100vw,100dvh)}@media(max-width:650px){main{padding:24px 18px}h1{font-size:32px}.compare{grid-template-columns:1fr 1fr;gap:10px}.panel{padding:10px}.controls{grid-template-columns:1fr}.label{font-size:10px}.mono{font-size:9px}.slider{grid-column:1/-1}}
+</style>
+<main>
+<div class="top"><span class="mono">STACKCHAN / FACE STUDIES</span><span class="mono tag">01 · EYES ONLY</span></div>
+<h1>让屏幕，成为它的脸。</h1>
+<p class="intro">去掉圆形头部，留下眼神。保留 Grok Bot 的眼形、眨眼与转动节奏，用更大的白色双眼，让黑色屏幕自然融入机身。头像层本身透明，下方黑色仅模拟设备屏幕。</p>
+<div class="compare">
+<section class="panel"><div class="label"><span>原版 · 圆形头部</span><span class="mono">ORIGINAL</span></div><div class="stage" id="original"></div><p class="caption">原播放器与原始数据，独立运行。</p></section>
+<section class="panel new"><div class="label"><span>新版 · 透明底白眼</span><span class="mono tag">WHITE EYES</span></div><div class="stage" id="new"></div><p class="caption">透明头像层 · 白色双眼 · 黑色由设备屏幕提供</p></section>
+</div>
+<div class="controls">
+<div class="states" id="states"></div>
+<label class="slider">整体放大 <input id="scale" aria-label="整体放大" type="range" min="1.2" max="2.2" step=".05" value="1.8"><output id="scaleValue">1.80×</output></label>
+<label class="slider">眼睛加宽 <input id="thickness" aria-label="眼睛加宽" type="range" min="1" max="1.5" step=".05" value="1.15"><output id="thicknessValue">1.15×</output></label>
+<div class="actions"><button id="blink">眨一下眼</button><button id="follow" aria-pressed="false">指针跟随</button><button id="fullscreen">纯黑全屏 ↗</button><label>全部状态 <select id="all" aria-label="全部状态"></select></label><span class="mono" id="status" role="status">LOADING</span></div>
+</div>
+<footer>独立实验皮肤 / 未修改原版与设备固件。思考、搜索等图标状态转译为眼神动作。 <a href="https://grokbot.yin.wiki/index.html" target="_blank" rel="noreferrer">Grok Bot 动画来源 ↗</a></footer>
+</main>
+<script type="module" src="./preview.js"></script>
+</html>

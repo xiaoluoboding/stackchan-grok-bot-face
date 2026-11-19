@@ -12,7 +12,15 @@ from pathlib import Path
 logger = logging.getLogger("hermes-voice")
 VOICE_PROMPT = (
     "用户通过桌面机器人语音下达任务。请执行下面的用户请求，最后用自然中文纯文本简短回答，"
-    "一般一句，复杂任务最多三句。失败或部分完成须明确说明。遵守项目指令，保留已有改动。\n\n用户请求：\n"
+    "一般一句，复杂任务最多三句。失败或部分完成须明确说明。遵守项目指令，保留已有改动。"
+    "语音查询重视及时性：新闻、百科、价格标准等联网问题，直接调用 Firecrawl MCP 的 "
+    "mcp__firecrawl__firecrawl_search（通常 limit=3）；工具若被延迟加载，先用 tool_search 查找 Firecrawl 搜索工具。"
+    "需要核实正文时再用 Firecrawl MCP 的 mcp__firecrawl__firecrawl_scrape 读取最相关的权威来源。"
+    "收费、政策、价格查询须核实生效日期和适用地区，不能把旧网页直接当作现行标准；无法确认时明确说明。"
+    "普通联网查询无需扫描本地文件、读取项目脚本、寻找 Python 环境，也不要用 terminal、curl、"
+    "execute_code 或本地 websearch.py 绕路搜索，也不要回退到内置 web_search/web_extract。"
+    "tool_search 最多发现一次；找不到 Firecrawl 或调用失败就立即简短报告原因，"
+    "不要反复换工具重试。不得编造来源、搜索结果或进度。\n\n用户请求：\n"
 )
 
 
@@ -59,7 +67,12 @@ class HermesSession:
                             if isinstance(session_id, str) and session_id:
                                 self._session_id = session_id
                         if event.get("type") == "tool_use" and on_progress:
-                            await on_progress("Hermes 正在调用工具处理任务。", detailed=False)
+                            name = event.get("name", "")
+                            logger.info("Hermes tool started name=%s", name)
+                            label = ("正在通过 Firecrawl 搜索资料。" if "firecrawl_search" in name else
+                                     "正在通过 Firecrawl 核对网页正文。" if "firecrawl_scrape" in name else
+                                     "Hermes 正在调用工具处理任务。")
+                            await on_progress(label, detailed=False)
                         elif event.get("type") == "result":
                             final = event
                     code = await process.wait()

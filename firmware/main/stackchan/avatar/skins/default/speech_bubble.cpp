@@ -22,7 +22,7 @@ static const int _bubble_max_offset_x = 0;
 LV_IMAGE_DECLARE(default_bubble_arrow);
 
 DefaultSpeechBubble::DefaultSpeechBubble(lv_obj_t* parent, lv_color_t primaryColor, lv_color_t secondaryColor,
-                                         const lv_font_t* font)
+                                         const lv_font_t* font, bool scroll_text)
 {
     _container = std::make_unique<Container>(parent);
     _container->setRadius(0);
@@ -57,7 +57,14 @@ DefaultSpeechBubble::DefaultSpeechBubble(lv_obj_t* parent, lv_color_t primaryCol
     _text->setAlign(LV_ALIGN_CENTER);
     _text->setPos(0, 0);
     _text->setWidth(320 - _text_mx * 2);
-    _text->setLongMode(LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
+    if (scroll_text) {
+        _text->setLongMode(LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
+    } else {
+        // Continuous marquee redraws compete with eyes and voice for SPI/CPU.
+        // Keep two static lines, updating with each incoming sentence.
+        _text->setLongMode(LV_LABEL_LONG_MODE_DOTS);
+        _text->setHeight(36);
+    }
 
     clearSpeech();
 }

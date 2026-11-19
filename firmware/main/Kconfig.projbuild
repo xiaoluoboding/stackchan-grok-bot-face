@@ -20,19 +20,29 @@ config OTA_URL
         The application will access this URL to check for new firmwares and server address.
 
 config STACKCHAN_CODEX_VOICE
-    bool "End voice commands locally for a Codex WebSocket gateway"
+    bool "End voice commands locally for local-agent voice mode"
     default n
     help
         Send listen.stop after two seconds of silence following speech, or
         after fifteen seconds of recording, when connected over WebSocket.
 
 config STACKCHAN_CODEX_VOICE_USB
-    bool "Send recognized voice tasks to Codex over USB, retaining XiaoZhi voice"
+    bool "Send local-agent voice tasks over USB, retaining XiaoZhi voice"
     depends on STACKCHAN_CODEX_VOICE
     default n
     help
-        Expose a Codex task tool through device MCP and relay requests over USB.
-        Return Codex results to the speech service as MCP tool responses.
+        Expose Hermes and local service tools through device MCP over USB.
+        Return results to the speech service as MCP tool responses. Codex
+        can be enabled separately with STACKCHAN_CODEX_AGENT.
+
+config STACKCHAN_CODEX_AGENT
+    bool "Enable optional Codex agent tools alongside Hermes"
+    depends on STACKCHAN_CODEX_VOICE_USB
+    default n
+    help
+        Register self.codex.execute and self.codex.result. Disabled by default;
+        Hermes and the shared USB transport remain available. Also start the
+        Mac bridge with --enable-codex when enabling this agent.
 
 config STACKCHAN_AUTO_INSTALL_FIRMWARE_UPDATES
     bool "Automatically install firmware updates during boot"

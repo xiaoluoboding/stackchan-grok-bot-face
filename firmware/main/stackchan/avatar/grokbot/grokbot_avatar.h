@@ -8,6 +8,7 @@
 #include "../avatar/avatar.h"
 #include "../skins/default/default.h"
 #include "grokbot_player.h"
+#include "alpha_bounds.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -37,12 +38,14 @@ public:
     };
 
     bool init(lv_obj_t* parent, const uint8_t* atlas, size_t atlas_size, int screen_width, int screen_height,
-              const lv_font_t* font = &lv_font_montserrat_16);
+              const lv_font_t* font = &lv_font_montserrat_16, bool transparent_eyes = false);
+    bool setAtlas(const uint8_t* atlas, size_t atlas_size, bool transparent_eyes);
     ~GrokBotAvatar() override;
 
     void update() override;
     void setEmotion(const Emotion& emotion) override;
 
+    void showWakeShy();
     void setMode(Mode mode);
     void setIdle()
     {
@@ -98,6 +101,7 @@ public:
     }
 
 private:
+    void setPalette(bool transparent_eyes);
     bool decode_frame(const GrokBotPlayer::FrameInfo& frame);
     bool decode_backward_frame(const GrokBotPlayer::FrameInfo& frame);
     bool rebuild_to_current();
@@ -121,6 +125,13 @@ private:
     uint8_t* frame_buffer_    = nullptr;
     uint8_t* packed_          = nullptr;
     uint8_t* delta_           = nullptr;
+
+    AlphaBounds previous_eyes_bounds_;
+    bool transparent_eyes_ = false;
+    bool full_redraw_pending_ = true;
+
+    int wake_shy_decorator_id_ = -1;
+    int64_t wake_shy_until_us_ = 0;
 
     Mode mode_                   = Mode::Idle;
     bool ready_                  = false;

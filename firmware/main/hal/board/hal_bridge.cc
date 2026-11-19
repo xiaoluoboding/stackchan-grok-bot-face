@@ -27,6 +27,14 @@
 #include <assets.h>
 #include <settings.h>
 
+// Called locally as soon as the wake-word event is accepted, before network I/O.
+void stackchan_wake_feedback()
+{
+    if (auto* display = dynamic_cast<StackChanAvatarDisplay*>(Board::GetInstance().GetDisplay())) {
+        display->ShowWakeShy();
+    }
+}
+
 static const char* _tag = "HAL_BRIDGE";
 
 static constexpr std::string_view _xiaozhi_config_nvs_ns                           = "xiaozhi";
@@ -150,6 +158,25 @@ static void usb_speech_task(void*)
                     line.back() >= '1' && line.back() <= '9') {
                     usb_record(line.back() - '0');
 #ifdef CONFIG_STACKCHAN_CODEX_VOICE_USB
+                } else if (!overflow && line.starts_with("STACKCHAN_AGENT_SYNC ")) {
+                    auto* payload = cJSON_Parse(line.c_str() + strlen("STACKCHAN_AGENT_SYNC "));
+                    auto* jobs = cJSON_GetObjectItem(payload, "jobs");
+                    if (cJSON_IsArray(jobs) && cJSON_GetArraySize(jobs) <= 32) {
+                        std::vector<int> ids;
+                        bool valid = true;
+                        cJSON* job;
+                        cJSON_ArrayForEach(job, jobs) {
+                            if (!cJSON_IsNumber(job) || job->valuedouble != job->valueint || job->valueint <= 0) {
+                                valid = false;
+                                break;
+                            }
+                            ids.push_back(job->valueint);
+                        }
+                        if (valid) Application::GetInstance().Schedule([ids = std::move(ids)]() {
+                            Application::GetInstance().SyncLocalTasks(ids);
+                        });
+                    }
+                    cJSON_Delete(payload);
                 } else if (!overflow && line.starts_with("STACKCHAN_FLOMO_RESULT ")) {
                     auto* result = cJSON_Parse(line.c_str() + strlen("STACKCHAN_FLOMO_RESULT "));
                     auto* id = cJSON_GetObjectItem(result, "id");
@@ -230,6 +257,47 @@ static void usb_speech_task(void*)
                     }
                     cJSON_Delete(result);
 #endif
+                } else if (!overflow && line.starts_with("STACKCHAN_AVATAR ")) {
+                    const auto selection = line.substr(strlen("STACKCHAN_AVATAR "));
+                    if (selection == "white-eyes" || selection == "original") {
+                        Application::GetInstance().Schedule([selection]() {
+                            auto* display = dynamic_cast<StackChanAvatarDisplay*>(Board::GetInstance().GetDisplay());
+                            const bool ok = display && display->SetAvatarSkin(selection == "white-eyes");
+                            ESP_LOGI(_tag, "Avatar command: %s %s", selection.c_str(), ok ? "OK" : "FAILED");
+                        });
+                    } else if (selection == "wake-shy") {
+                        Application::GetInstance().Schedule([]() { stackchan_wake_feedback(); });
+                    } else if (selection == "snapshot") {
+                        Application::GetInstance().Schedule([]() {
+                            const auto state = Application::GetInstance().GetDeviceState();
+                            if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
+                                usb_write("STACKCHAN_AVATAR_SNAPSHOT_ERROR busy\n"); return;
+                            }
+                            std::string jpeg;
+                            if (!Board::GetInstance().GetDisplay()->SnapshotToJpeg(jpeg, 90)) {
+                                usb_write("STACKCHAN_AVATAR_SNAPSHOT_ERROR capture\n"); return;
+                            }
+                            usb_write("STACKCHAN_AVATAR_SNAPSHOT_BEGIN\n");
+                            for (size_t offset = 0; offset < jpeg.size(); offset += 96) {
+                                unsigned char encoded[129]; size_t length = 0;
+                                if (mbedtls_base64_encode(encoded, sizeof(encoded), &length,
+                                    reinterpret_cast<const unsigned char*>(jpeg.data() + offset),
+                                    std::min(size_t(96), jpeg.size() - offset)) != 0) break;
+                                usb_write("STACKCHAN_AVATAR_SNAPSHOT_DATA " +
+                                    std::string(reinterpret_cast<char*>(encoded), length) + "\n");
+                            }
+                            usb_write("STACKCHAN_AVATAR_SNAPSHOT_END\n");
+                        });
+                    } else if (selection == "status") {
+                        // NVS reads may also disable flash cache. The USB reader
+                        // has a PSRAM stack, so both reads and writes belong on
+                        // the application's internal-RAM task.
+                        Application::GetInstance().Schedule([]() {
+                            ESP_LOGI(_tag, "Avatar preference: %s", StackChanAvatarDisplay::WhiteEyesSelected() ? "white-eyes" : "original");
+                        });
+                    } else {
+                        ESP_LOGW(_tag, "Invalid avatar selection");
+                    }
                 } else if (!overflow && line.starts_with("STACKCHAN_CHAT ")) {
                     const auto* payload = line.c_str() + sizeof("STACKCHAN_CHAT ") - 1;
                     auto* decoded = cJSON_ParseWithOpts(payload, nullptr, true);

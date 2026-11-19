@@ -1,0 +1,8 @@
+<!doctype html><meta charset="utf-8"><style>html,body{margin:0;background:transparent}#stage{width:320px;height:320px}</style><div id="stage"></div>
+<script type="module">
+import { createWhiteEyes } from './white-eyes.js';
+const p = new URLSearchParams(location.search), size = Number(p.get('size') || 320);
+const stage = document.querySelector('#stage'); stage.style.width = stage.style.height = `${size}px`;
+window.bot = createWhiteEyes(stage, { size, state:p.get('state') || 'idle', scale:Number(p.get('scale') || 1.8), frozenAt:0, reducedMotion:false });
+await window.bot.ready; window.bakerReady = true;
+</script>

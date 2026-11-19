@@ -11,6 +11,33 @@
 - 显示使用双 4 行 DMA 缓冲区，减少内部 RAM 占用。聆听与说话时把 Grok Bot 动画目标帧率限制为 12 FPS，使音频任务获得更多处理时间。
 - 保留屏幕触摸交互和头部触摸反应。
 
+### 透明白眼头像与切换
+
+新增独立透明白眼皮肤，首次默认启用。仅绘制白色眼睛，透明区域透出设备黑屏；复用 Grok Bot 的眼形、眨眼和动作数据，思考/搜索等原图标状态转为眼神动作。
+
+- **长按脸部**：在 White eyes 与 Original Grok Bot 间即时切换；短按保持原有对话操作。选择写入 NVS，重启后保留。
+- **SETUP → Device → Avatar skin**：选择头像并退出设置，设备重启应用后加载。
+- 原版 `grokbot.atlas` 与第三方播放器、recipes 均保持原样。新 `main/white_eyes.atlas` 独立嵌入应用，200×200、15 FPS、53 状态，重复序列共享存储，大小 1,279,308 字节。
+- 白眼图集采用相同 GBZ1 差分格式；I4 的 ARGB 调色板将索引映射为白色 + 0–255 alpha，抗锯齿边缘半透明，不填充矩形黑底。聆听和说话沿用 12 FPS 上限。
+- 只需构建并刷应用，无需重写 assets 或分区表。当前 0x4F0000 应用分区余量约 74 KiB，后续扩大资源需重新检查容量。
+- 浏览器预览、透明帧与图集重建、设备串口截图诊断见 [白眼工具说明](../tools/white-eyes/README.md)。
+
+### 唤醒害羞反馈
+
+识别到「你好小智」后，本地立即显示一次原有粉红色害羞腮红（`ShyDecorator`），配合已有 shy 眼神，约 1.2 秒后自动恢复当前聆听/说话状态。保留眼睛，不替换成独立爱心图形。原版和透明白眼版均支持，不依赖网络连接成功；播放期间重复触发会合并，日常聆听状态变化不会重复播放。
+
+反馈接在 `Application::HandleWakeWordDetectedEvent()` 的有效唤醒分支，依赖修改同步记录在 `patches/xiaozhi-esp32.patch`。诊断脚本：`tools/white-eyes/check_wake_shy.py --microphone`（需先暂停 bridge）。
+
+2026-11-19 已仅刷入应用并实机验证：两套皮肤均显示现有粉红色 ShyDecorator，单次反馈约 1.21–1.23 秒，重复触发不延长。Mac 播放「你好小智」后，设备麦克风确认唤醒、开始害羞反馈、进入聆听、反馈结束。保留白眼皮肤，USB bridge 已恢复。
+
+### 播报期间的动画优化
+
+透明白眼逐帧仅刷新新旧眼睛覆盖区域的并集；眨眼结束也会清掉旧像素，切换皮肤时仍完整重绘，原版图集保持独立。LCD DMA 完成通过静态信号量唤醒等待任务，避免 LVGL 默认忙轮询。两套 Grok Bot 皮肤字幕改为两行静态按句更新，超长内容显示省略号，避免持续滚动争抢屏幕刷新资源。语音/聆听仍以 12 FPS 为目标，未提高音频和显示的内存预算。
+
+2026-11-19 实机使用同一提示「讲个三十秒的故事」对照：原版本 34 秒播报动画中位约 2.77 FPS；优化版本实际播报约 58 秒，中位 11.88 FPS、最低 10.89 FPS，确认扬声器交付音频并回到待机。云端故事内容与时长不同，因此是相同请求的运行对照，并非固定音频基准。新版本未记录屏幕任务忙等待告警，长播报仍记录一次 CPU0 `audio_input` / AEC 看门狗告警（未重启），此项尚未解决。
+
+主机测试验证 300 帧移动、边界、低透明度和眨眼场景的局部重绘与整图重绘逐像素一致；运动坐标测试也通过。诊断脚本 `tools/white-eyes/check_speech_animation.py`，原始结果位于本地 `build/speech-animation/`。
+
 ### 语音、网络与更新
 
 - 使用 ESP-SR 的 wn9l_nihaoxiaozhi_tts3 WakeNet9l 模型识别“你好小智”。唤醒在设备端完成；对话依赖网络、语音服务和设备激活。
@@ -65,13 +92,56 @@ CHROME_BIN=/path/to/chrome SIZE=200 node tools/grokbot/bake.mjs
 
 ## Hermes 语音模式
 
+语音联网查询优先直接调用 Hermes 中配置的 Firecrawl MCP：
+`mcp__firecrawl__firecrawl_search` 搜索，必要时用 `mcp__firecrawl__firecrawl_scrape`
+核对权威正文。首次可通过 `tool_search` 发现工具；连接失败应说明原因，
+不再通过终端脚本、curl 或切换 Python 环境反复尝试。
+在本机 `~/.hermes/config.yaml` 的 `mcp_servers.firecrawl` 配置 HTTP URL、认证
+headers 和 `tools.include: [firecrawl_search, firecrawl_scrape]`，密钥不写入仓库。
+Hermes gateway 会自动加载连接配置；更新语音指令后需重启 USB bridge。
+2026-11-19 验证 Hermes 直接通过 Firecrawl MCP 搜索和读取正文：本机收费标准
+查询耗时 23.75 秒；实机 Hacker News 查询耗时 13.1 秒，约 16.8 秒开始播报，
+未调用终端搜索脚本。以上是单次实测，网络和网页响应会影响后续耗时。
+
+
+USB bridge 每 5 秒发送 `STACKCHAN_AGENT_SYNC {"jobs":[正在处理的任务编号]}`。
+设备连续两次核对不到当前任务时结束等待，释放任务槽，并明确提示检查电脑后台；
+不会重新执行任务。单次漏报不会清理任务，正常在执行和投递结果的任务会持续续租。
+bridge 断开超过 30 秒，或设备累计等待超过 660 秒，也会结束等待。
+Hermes CLI 默认超时仍是 600 秒；自定义超时应小于设备的 660 秒上限。
+这些操作只结束设备等待，不保证取消 Hermes gateway 已接受的工作。
+2026-11-19 实机验证：保留 bridge 确认仍在执行的任务；重启 bridge 后连续两次
+核对不到旧任务时释放任务槽；停止 bridge 后约 30 秒由设备超时结束等待。
+故障测试使用挂起的测试 runner，未重复执行业务请求。随后真实 Hermes 请求
+「说测试成功」用时约 2.5 秒，设备确认收到结果并完成音频输出。
+
+
+
 设备通过 `self.hermes.execute({"task":"用户请求"})` 将任务交给 Mac 上已安装的
 Hermes Agent，随后用 `self.hermes.result({})` 查询进度和结果，完成后由小智用原音色播报。
 这是 USB 直连本地 Hermes 的执行链路；识别和语音合成仍使用原小智服务。
 
 刷入包含此功能的固件，启用下面 Codex 语音模式中的两个配置项，使用同一个
 `tools/codex/bridge.py` 启动命令即可。不要同时启动两个桥接进程占用同一串口。
-对机器人说「请让 Hermes 查看当前项目分支，完成后告诉我」。
+普通任务默认使用 Hermes，无需说出 agent 名称。对机器人说
+「查看当前项目分支，完成后告诉我」即可；不会先询问使用哪个 agent。
+普通问答、查资料、网页研究和项目任务都默认交给 Hermes；简单问候直接回应。
+行情、股票分析和 flomo 笔记继续优先使用已有专用工具，只有明确要求快速/直接
+Firecrawl 搜索时才使用独立搜索工具。
+即使以后恢复 Codex，普通任务也仍默认交给 Hermes，只有明确点名 Codex 才使用它。
+
+Codex 现为可选接入，默认停用。保留 `CONFIG_STACKCHAN_CODEX_VOICE=y` 和
+`CONFIG_STACKCHAN_CODEX_VOICE_USB=y`，它们也是 Hermes 共用的语音和 USB 通道，
+不能为了停用 Codex 而关闭。默认 `CONFIG_STACKCHAN_CODEX_AGENT=n`，设备不注册
+`self.codex.execute` / `self.codex.result`，普通项目、代码和研究任务可直接交给 Hermes。
+桥接默认也不会导入 Codex SDK、启动 app-server 或预热 Codex。旧固件误发 Codex
+任务时只返回「接入已停用」，不会执行任务或自动转交另一个 agent。
+
+以后恢复 Codex：将 `CONFIG_STACKCHAN_CODEX_AGENT=y` 写入实际 `sdkconfig`
+（也同步到 `sdkconfig.defaults.local` 供后续构建），重新构建并刷入应用；
+启动同一个 bridge 时追加 `--enable-codex`。再次停用时去掉该参数，并将固件选项
+设为 n 后构建刷入。Codex 会话、进度和重传逻辑均保留，无需重新接入。
+
 
 Mac 端调用 `hermes chat --format stream-json --query-file - --in 项目目录`，
 从 stdin 原样传递请求，使用本地 Hermes 的模型、登录配置和工具权限；不会附加 `--yolo`。
@@ -95,6 +165,24 @@ USB 语音固件把 MCP 工具列表按约 3500 字节分页，降低音频引�
 `self.hermes.execute`，Mac 本地 Hermes 返回「测试成功。」，设备经
 `self.hermes.result` 取得结果，日志确认 `Speech audio delivered to speaker`。
 另外已验证本地 Hermes 两轮会话可续接上下文；此轮实机测试未测试麦克风识别。
+
+2026-11-19 已将 Codex 设为默认停用，并编译、仅刷入应用和重启 bridge。
+91 项桥接测试通过，覆盖 Hermes 无 Codex SDK 启动、Codex 停用返回和显式重新启用。
+实机短文字注入「让Hermes说测试成功」选择 `self.hermes.execute`，Hermes 返回
+「测试成功。」，设备确认存储结果、完成播报并回到待机；本轮未验证麦克风识别。
+桥接启动日志为 `Hermes enabled; Codex disabled`，无 Codex app-server 子进程。
+
+2026-11-19 已更新并刷入默认路由描述，普通任务无需点名 Hermes：
+
+- 注入短文字「查看当前项目分支」，设备自动调用 `self.hermes.execute`，
+  返回当前分支 `feat/stackchan-codex-voice`，存储结果、播报后回到待机。
+- 设备实际麦克风听写「帮我查询李诞这个人」，未点名 agent，也自动调用
+  `self.hermes.execute`；Hermes 执行约 11.6 秒后返回，设备确认结果存储，
+  由原语音服务播报完毕后回到待机。
+- 「一句话解释光合作用」仍由云端模型直接回答，未调用 Hermes。
+  默认路由通过 MCP 工具描述引导云端选择，不是固件强制转发所有问答；
+  简单知识问答可能直接回应。首次 Mac 合成语音测试未得到预期听写，
+  未计为项目分支的麦克风测试成功。
 
 ## Codex 语音模式
 
@@ -124,18 +212,22 @@ USB 进度包为 `STACKCHAN_CODEX_PROGRESS {"id":任务编号,"seq":递增序号
 CONFIG_OTA_URL="https://api.tenclass.net/xiaozhi/ota/"
 CONFIG_STACKCHAN_CODEX_VOICE=y
 CONFIG_STACKCHAN_CODEX_VOICE_USB=y
+# Codex 为可选；Hermes 不需要此项。
+CONFIG_STACKCHAN_CODEX_AGENT=y
 ~~~
 
 构建并刷入应用后，用数据线连接机器人和 Mac。桥接程序需要 Python 3.11 或更新版本，
 使用本仓库的 `tools/codex/session.py` 常驻运行 Codex app-server，复用项目上下文和 MCP
-连接。启动时在后台预热一次，日志出现 `Ready` 后 Codex 会话已就绪；富途查询不必等待预热。在本仓库根目录启动：
+连接。启用 Codex 时，在后台预热一次，日志出现 `Ready` 后 Codex 会话已就绪；Hermes 和富途查询不必等待预热。在本仓库根目录启动：
 
 ~~~bash
 uv run --with pyserial --with openai-codex==0.170.0 --with futu-api python tools/codex/bridge.py \
   --port /dev/cu.usbmodem1101 --project "$PWD"
 ~~~
 
-将串口改成当前设备路径，`--project` 指向需要 Codex 操作的项目目录。桥接程序需要
+上面的命令默认仅启用 Hermes；需要 Codex 时追加 `--enable-codex`，并启用固件的
+`CONFIG_STACKCHAN_CODEX_AGENT`。只有启用 Codex 后才会启动预热。
+将串口改成当前设备路径，`--project` 指向需要本地 agent 操作的项目目录。桥接程序需要
 独占串口，请关闭其他串口监视器。Codex 会话使用 `workspace-write`，可以根据语音指令
 修改目标项目。网关和转写服务的 OpenAI API Key 在 USB 模式中不参与链路。
 
@@ -282,7 +374,7 @@ Mac 通过 Firecrawl MCP 搜索并将网页标题、来源链接、搜索摘要�
 
 `query` 必填，最多 512 UTF-8 字节；`limit` 可省略，默认为 3，支持 1–3 条。
 产品名称有歧义时建议使用引号和准确关键词。返回的是搜索摘要，不是已阅读全文的核实结论；
-小智按摘要简短回答，按需提及来源，默认不逐字朗读链接。需要深入阅读全文的研究仍可交给 Codex。
+小智按摘要简短回答，按需提及来源，默认不逐字朗读链接。需要深入阅读全文的研究默认交给 Hermes。
 
 密钥按以下顺序读取，不需要将密钥复制到项目中：
 
@@ -409,3 +501,10 @@ python3 tools/codex/flomo_notes.py '{"action":"create","text":"StackChan 接入�
 的自动语音网关。由配置服务向固件下发 WebSocket URL 和 token，并启用网关的
 `STACKCHAN_AUTO_BACKEND=codex`。此模式使用网关的 STT 和 TTS，播报音色由网关选择。
 自动录音在检测到人声后静音约两秒收尾，单轮最长十五秒，播报结束后回到待机。
+
+2026-11-19 透明白眼接入实机验证：仅刷应用，校验 Flash 写入哈希通过；原版 assets 图集未改动。
+设备截图确认白眼和原版可切换，启动 BootLogo 已清理，重启后白眼选择保留，白眼待机日志达到约 14–15 FPS。
+已修复新增串口查询在 PSRAM 任务读取 NVS 的断言，并把首帧解压保留在 LVGL 任务，避免主任务栈溢出。
+53 个状态的浏览器路径检查及 3352 帧图集解码/差分逆向检查通过。
+本轮初期语音服务曾出现 OTA HTTPS / MQTT TLS 连接失败；服务恢复后补测短文字「你好」通过：白眼版切到说话状态，日志确认 `Speech audio delivered to speaker`，随后回到待机。未重测麦克风听写。
+USB bridge 已恢复；切换回透明白眼作为本次试用的默认选择。

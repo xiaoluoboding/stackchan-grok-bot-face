@@ -5,6 +5,7 @@
  */
 #include "app_setup.h"
 #include "workers/feature_toggle.h"
+#include "workers/avatar_skin.h"
 #include <hal/hal.h>
 #include <mooncake.h>
 #include <mooncake_log.h>
@@ -60,7 +61,13 @@ void AppSetup::onOpen()
         },
         {
             "Device",
-            {{"Brightness",
+            {{"Avatar skin",
+              [&]() {
+                  _destroy_menu = true;
+                  _need_warm_reset = true;
+                  _worker = std::make_unique<AvatarSkinWorker>();
+              }},
+             {"Brightness",
               [&]() {
                   _destroy_menu = true;
                   _worker       = std::make_unique<BrightnessSetupWorker>();

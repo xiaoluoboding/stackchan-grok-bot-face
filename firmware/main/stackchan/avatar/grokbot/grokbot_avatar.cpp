@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "grokbot_avatar.h"
+#include "../decorators/decorators.h"
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -59,7 +60,7 @@ void* alloc_frame_buffer(size_t size)
 }  // namespace
 
 bool GrokBotAvatar::init(lv_obj_t* parent, const uint8_t* atlas, size_t atlas_size, int screen_width, int screen_height,
-                         const lv_font_t* font)
+                         const lv_font_t* font, bool transparent_eyes)
 {
     if (parent == nullptr || atlas == nullptr || atlas_size == 0) {
         ESP_LOGE(TAG, "Invalid init arguments");
@@ -93,15 +94,7 @@ bool GrokBotAvatar::init(lv_obj_t* parent, const uint8_t* atlas, size_t atlas_si
     }
     packed_ = frame_buffer_ + kPaletteSize;
 
-    for (int i = 0; i < 16; ++i) {
-        const uint8_t v = static_cast<uint8_t>(i * 17);
-        lv_color32_t color = {};
-        color.blue         = v;
-        color.green        = v;
-        color.red          = v;
-        color.alpha        = 0xFF;
-        memcpy(frame_buffer_ + static_cast<size_t>(i) * sizeof(color), &color, sizeof(color));
-    }
+    setPalette(transparent_eyes);
 
     panel_ = lv_obj_create(parent);
     lv_obj_set_size(panel_, screen_width, screen_height);
@@ -110,7 +103,7 @@ bool GrokBotAvatar::init(lv_obj_t* parent, const uint8_t* atlas, size_t atlas_si
     lv_obj_set_style_border_width(panel_, 0, 0);
     lv_obj_set_style_pad_all(panel_, 0, 0);
     lv_obj_set_style_bg_color(panel_, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(panel_, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_opa(panel_, transparent_eyes ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
     lv_obj_remove_flag(panel_, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(panel_, LV_OBJ_FLAG_CLICKABLE);
 
@@ -132,7 +125,7 @@ bool GrokBotAvatar::init(lv_obj_t* parent, const uint8_t* atlas, size_t atlas_si
     _key_elements.rightEye     = std::make_unique<Feature>();
     _key_elements.mouth        = std::make_unique<Feature>();
     _key_elements.speechBubble = std::make_unique<DefaultSpeechBubble>(panel_, lv_color_white(), lv_color_black(),
-                                                                       font != nullptr ? font : &lv_font_montserrat_16);
+                                                                       font != nullptr ? font : &lv_font_montserrat_16, false);
 
     const int64_t now = esp_timer_get_time();
     next_frame_us_    = now;
@@ -149,6 +142,43 @@ bool GrokBotAvatar::init(lv_obj_t* parent, const uint8_t* atlas, size_t atlas_si
     ESP_LOGI(TAG, "Atlas ready: %dx%d, %d clips, %d fps, indexed=%u delta=%u bytes", player_.width(),
              player_.height(), player_.clip_count(), player_.fps(), static_cast<unsigned>(kPaletteSize + packed_size),
              static_cast<unsigned>(packed_size));
+    return true;
+}
+
+void GrokBotAvatar::setPalette(bool transparent_eyes)
+{
+    transparent_eyes_ = transparent_eyes;
+    full_redraw_pending_ = true;
+    previous_eyes_bounds_ = {};
+    for (int i = 0; i < 16; ++i) {
+        const uint8_t v = static_cast<uint8_t>(i * 17);
+        lv_color32_t color = {};
+        color.blue = color.green = color.red = transparent_eyes ? 255 : v;
+        color.alpha = transparent_eyes ? v : 255;
+        memcpy(frame_buffer_ + static_cast<size_t>(i) * sizeof(color), &color, sizeof(color));
+    }
+}
+
+bool GrokBotAvatar::setAtlas(const uint8_t* atlas, size_t atlas_size, bool transparent_eyes)
+{
+    GrokBotPlayer candidate;
+    if (!ready_ || !candidate.init(atlas, atlas_size) || candidate.width() != player_.width() ||
+        candidate.height() != player_.height() || candidate.packed_frame_size() != player_.packed_frame_size()) {
+        ESP_LOGE(TAG, "Skin atlas incompatible; keeping current avatar");
+        return false;
+    }
+    // Drop converted indexed pixels before changing the palette or frame buffer.
+    lv_image_cache_drop(&image_dsc_);
+    player_ = candidate;
+    setPalette(transparent_eyes);
+    memset(packed_, 0, player_.packed_frame_size());
+    lv_obj_set_style_bg_opa(panel_, transparent_eyes ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+    playback_fps_ = (mode_ == Mode::Listening || mode_ == Mode::Speaking) ? 12 : player_.fps();
+    rebuild_pending_ = true;
+    reverse_ = false;
+    next_frame_us_ = esp_timer_get_time();
+    if (!choose_clip_for_mode()) return false;
+    ESP_LOGI(TAG, "Skin switched: %s", transparent_eyes ? "white-eyes (alpha)" : "original");
     return true;
 }
 
@@ -182,7 +212,19 @@ void GrokBotAvatar::update()
     if (!ready_ || image_ == nullptr) {
         return;
     }
+    if (wake_shy_until_us_ != 0 && esp_timer_get_time() >= wake_shy_until_us_) {
+        removeDecorator(wake_shy_decorator_id_);
+        wake_shy_decorator_id_ = -1;
+        wake_shy_until_us_ = 0;
+        choose_clip_for_mode();
+        next_frame_us_ = esp_timer_get_time();
+        ESP_LOGI(TAG, "Wake shy finished; restored current avatar mode");
+    }
     if (suspended_) {
+        // Decode one pending skin frame on the normal LVGL update task,
+        // even while TLS pauses playback. Decompression has a substantial
+        // stack footprint and must not run in the app's NVS switch callback.
+        if (rebuild_pending_) rebuild_to_current();
         return;
     }
 
@@ -229,6 +271,20 @@ void GrokBotAvatar::update()
     if (now >= next_log_us_) {
         log_frame_stats(now);
     }
+}
+
+void GrokBotAvatar::showWakeShy()
+{
+    if (!ready_) return;
+    const int64_t now = esp_timer_get_time();
+    if (wake_shy_until_us_ > now) return;
+    removeDecorator(wake_shy_decorator_id_);
+    // Reuse the firmware's existing pink blush, exactly as head-petting does.
+    wake_shy_decorator_id_ = addDecorator(std::make_unique<ShyDecorator>(lv_obj_get_parent(panel_), 0));
+    wake_shy_until_us_ = now + 1200000;
+    select_clip("shy");
+    next_frame_us_ = now;
+    ESP_LOGI(TAG, "Wake shy started (1200 ms, existing pink blush)");
 }
 
 void GrokBotAvatar::setSuspended(bool suspended)
@@ -380,9 +436,29 @@ bool GrokBotAvatar::render_backward_frame()
 
 void GrokBotAvatar::invalidate_image()
 {
-    if (image_ != nullptr) {
+    if (image_ == nullptr) return;
+    lv_image_cache_drop(&image_dsc_);
+    if (!transparent_eyes_) {
         lv_obj_invalidate(image_);
+        return;
     }
+    const auto current = packed_alpha_bounds(packed_, player_.width(), player_.height());
+    if (full_redraw_pending_) {
+        // In particular, erase the old opaque head when switching skins.
+        lv_obj_invalidate(image_);
+        full_redraw_pending_ = false;
+    } else {
+        // Include both footprints: blinking/moving eyes must erase old pixels.
+        const auto dirty = union_alpha_bounds(previous_eyes_bounds_, current);
+        if (dirty.valid()) {
+            lv_area_t image_area;
+            lv_obj_get_coords(image_, &image_area);
+            lv_area_t area = {image_area.x1 + dirty.x1, image_area.y1 + dirty.y1,
+                              image_area.x1 + dirty.x2, image_area.y1 + dirty.y2};
+            lv_obj_invalidate_area(image_, &area);
+        }
+    }
+    previous_eyes_bounds_ = current;
 }
 
 bool GrokBotAvatar::select_clip(const char* name)
@@ -413,6 +489,11 @@ void GrokBotAvatar::play_next_clip()
 
 bool GrokBotAvatar::choose_clip_for_mode()
 {
+    // State changes are still recorded during feedback. Keep the shy clip for
+    // this one-shot, then resolve the latest listening/speaking mode on expiry.
+    if (wake_shy_until_us_ > esp_timer_get_time()) {
+        return strcmp(currentClipName(), "shy") == 0 || select_clip("shy");
+    }
     const char* next = emotion_override_ ? choose_emotion_clip() : nullptr;
     if (next != nullptr) {
         return select_clip(next);

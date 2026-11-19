@@ -77,7 +77,8 @@ private:
  */
 class DefaultSpeechBubble : public SpeechBubble {
 public:
-    DefaultSpeechBubble(lv_obj_t* parent, lv_color_t primaryColor, lv_color_t secondaryColor, const lv_font_t* font);
+    DefaultSpeechBubble(lv_obj_t* parent, lv_color_t primaryColor, lv_color_t secondaryColor, const lv_font_t* font,
+                        bool scroll_text = true);
     ~DefaultSpeechBubble();
 
     void setSpeech(std::string_view text) override;

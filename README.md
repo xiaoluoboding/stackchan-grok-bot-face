@@ -19,10 +19,10 @@
 
 ## 语音下达 Codex 任务
 
-Grok Bot 固件沿用小智服务的听写和原有音色，通过 USB 将语音任务交给 Mac 上的 Codex，完成后用原来的声音播报结果。Firecrawl 等 MCP 服务由 Codex 加载。Grok Bot 接入方式见 [固件配置](firmware/README.md#codex-语音模式)。
+Grok Bot 固件沿用小智服务的听写和原有音色，通过 USB 将语音任务交给 Mac 上的本地 agent，完成后用原来的声音播报结果。Codex 为可选接入，默认停用。Grok Bot 接入方式见 [固件配置](firmware/README.md#codex-语音模式)。
 
-同一 USB bridge 也支持本地 Hermes Agent：设备提供 `self.hermes.execute` 和
-`self.hermes.result`，使用 Hermes 自己的配置和独立会话。见 [Hermes 语音模式](firmware/README.md#hermes-语音模式)。
+USB bridge 当前默认使用本地 Hermes Agent，Codex 以独立开关暂停，原有逻辑完整保留：设备提供 `self.hermes.execute` 和
+`self.hermes.result`，普通任务无需点名即可使用 Hermes 自己的配置和独立会话。见 [Hermes 语音模式](firmware/README.md#hermes-语音模式)。
 
 USB 桥接还支持 `self.futu.execute`：直接查询 Mac 上已登录的 OpenD，取得股票行情快照，
 由小智简短播报价格和涨跌幅。对机器人说「用富途查询腾讯控股的行情」即可。

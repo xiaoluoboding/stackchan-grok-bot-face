@@ -8,6 +8,7 @@
 #include <esp_err.h>
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
+#include <freertos/semphr.h>
 #include <vector>
 #include <cstring>
 #include <src/misc/cache/lv_cache.h>
@@ -17,6 +18,7 @@
 #include <stackchan/stackchan.h>
 #include <stackchan/avatar/grokbot/grokbot_avatar.h>
 #include <assets.h>
+#include <application.h>
 #include <assets/lang_config.h>
 #include <hal/hal.h>
 
@@ -24,6 +26,66 @@ using namespace stackchan;
 using namespace stackchan::avatar;
 
 #define TAG "StackChanAvatarDisplay"
+namespace {
+// The board has one LCD for the process lifetime. Keep the ISR semaphore in
+// internal static RAM; it must remain available when PSRAM/cache are busy.
+StaticSemaphore_t lcd_flush_semaphore_storage;
+SemaphoreHandle_t lcd_flush_semaphore = nullptr;
+
+bool lcd_transfer_done(esp_lcd_panel_io_handle_t, esp_lcd_panel_io_event_data_t*, void* context)
+{
+    BaseType_t awakened = pdFALSE;
+    xSemaphoreGiveFromISR(static_cast<SemaphoreHandle_t>(context), &awakened);
+    return awakened == pdTRUE;
+}
+
+void wait_for_lcd_transfer(lv_display_t* display)
+{
+    // LVGL clears its flushing flag after this callback returns. Signalling
+    // only the semaphore in the ISR avoids stale completion tokens/races with
+    // a separate flush_ready() path when double buffering.
+    xSemaphoreTake(static_cast<SemaphoreHandle_t>(lv_display_get_user_data(display)), portMAX_DELAY);
+}
+}  // namespace
+
+extern const uint8_t white_eyes_atlas_start[] asm("_binary_white_eyes_atlas_start");
+extern const uint8_t white_eyes_atlas_end[] asm("_binary_white_eyes_atlas_end");
+
+void StackChanAvatarDisplay::ShowWakeShy()
+{
+    DisplayLockGuard lock(this);
+    auto& stackchan = GetStackChan();
+    if (!stackchan.hasAvatar()) return;
+    if (auto* avatar = dynamic_cast<GrokBotAvatar*>(&stackchan.avatar())) avatar->showWakeShy();
+}
+
+bool StackChanAvatarDisplay::WhiteEyesSelected()
+{
+    Settings settings("avatar");
+    return settings.GetBool("white_eyes", true);
+}
+
+bool StackChanAvatarDisplay::SetAvatarSkin(bool white_eyes)
+{
+    DisplayLockGuard lock(this);
+    auto& stackchan = GetStackChan();
+    if (!stackchan.hasAvatar()) return false;
+    auto* avatar = dynamic_cast<GrokBotAvatar*>(&stackchan.avatar());
+    if (!avatar) return false;
+    void* data = nullptr;
+    size_t size = 0;
+    if (white_eyes) {
+        data = const_cast<uint8_t*>(white_eyes_atlas_start);
+        size = white_eyes_atlas_end - white_eyes_atlas_start;
+    } else if (!Assets::GetInstance().GetAssetData("grokbot.atlas", data, size)) {
+        return false;
+    }
+    if (!avatar->setAtlas(static_cast<const uint8_t*>(data), size, white_eyes)) return false;
+    Settings settings("avatar", true);
+    settings.SetBool("white_eyes", white_eyes);
+    ESP_LOGI(TAG, "Avatar selection saved: %s", white_eyes ? "white-eyes" : "original");
+    return true;
+}
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
@@ -168,6 +230,21 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
         return;
     }
 
+    // Replace the port's polling completion path with a blocking DMA wait.
+    // Install both callbacks under the LVGL lock so no flush can use half of
+    // the new synchronization scheme. The SPI drawing callback stays intact.
+    Lock();
+    if (lcd_flush_semaphore == nullptr) {
+        lcd_flush_semaphore = xSemaphoreCreateBinaryStatic(&lcd_flush_semaphore_storage);
+    }
+    xSemaphoreTake(lcd_flush_semaphore, 0);
+    lv_display_set_user_data(display_, lcd_flush_semaphore);
+    const esp_lcd_panel_io_callbacks_t callbacks = {.on_color_trans_done = lcd_transfer_done};
+    ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(panel_io_, &callbacks, lcd_flush_semaphore));
+    lv_display_set_flush_wait_cb(display_, wait_for_lcd_transfer);
+    Unlock();
+    ESP_LOGI(TAG, "LCD DMA completion uses semaphore wait (no busy spin)");
+
     if (offset_x != 0 || offset_y != 0) {
         lv_display_set_offset(display_, offset_x, offset_y);
     }
@@ -257,6 +334,9 @@ void StackChanAvatarDisplay::SetupUI()
     DisplayLockGuard lock(this);
 
     ESP_LOGI(TAG, "Creating Stack-chan Avatar...");
+    // The original opaque panel covered this logo. Transparent eyes must
+    // actually remove it so startup labels cannot show through the face.
+    GetHAL().bootLogo.reset();
 
     std::unique_ptr<avatar::Avatar> avatar;
     lv_obj_t* click_panel = nullptr;
@@ -264,22 +344,30 @@ void StackChanAvatarDisplay::SetupUI()
     int grokbot_clips     = 0;
     int grokbot_fps       = 0;
 
-    void* atlas_data  = nullptr;
-    size_t atlas_size = 0;
-    if (Assets::GetInstance().GetAssetData("grokbot.atlas", atlas_data, atlas_size)) {
-        auto grokbot = std::make_unique<GrokBotAvatar>();
-        if (grokbot->init(lv_screen_active(), static_cast<const uint8_t*>(atlas_data), atlas_size, width_, height_)) {
-            click_panel   = grokbot->getPanel();
-            grokbot_clips = grokbot->clipCount();
-            grokbot_fps   = grokbot->fps();
-            avatar        = std::move(grokbot);
-            is_grokbot    = true;
-            ESP_LOGI(TAG, "Using GrokBot atlas avatar (%d clips @ %d fps)", grokbot_clips, grokbot_fps);
-        } else {
-            ESP_LOGE(TAG, "GrokBot atlas initialization failed, falling back to default avatar");
+    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
+    const bool prefer_white = WhiteEyesSelected();
+    for (int attempt = 0; attempt < 2 && !avatar; ++attempt) {
+        const bool white = prefer_white && attempt == 0;
+        if (!prefer_white && attempt > 0) break;
+        void* atlas_data = nullptr;
+        size_t atlas_size = 0;
+        if (white) {
+            atlas_data = const_cast<uint8_t*>(white_eyes_atlas_start);
+            atlas_size = white_eyes_atlas_end - white_eyes_atlas_start;
+        } else if (!Assets::GetInstance().GetAssetData("grokbot.atlas", atlas_data, atlas_size)) {
+            continue;
         }
-    } else {
-        ESP_LOGW(TAG, "grokbot.atlas not found in assets partition, using default avatar");
+        auto grokbot = std::make_unique<GrokBotAvatar>();
+        if (grokbot->init(lv_screen_active(), static_cast<const uint8_t*>(atlas_data), atlas_size, width_, height_,
+                          &lv_font_montserrat_16, white)) {
+            click_panel = grokbot->getPanel();
+            grokbot_clips = grokbot->clipCount();
+            grokbot_fps = grokbot->fps();
+            avatar = std::move(grokbot);
+            is_grokbot = true;
+            ESP_LOGI(TAG, "Using %s atlas avatar (%d clips @ %d fps)", white ? "white-eyes (alpha)" : "original GrokBot", grokbot_clips, grokbot_fps);
+        }
     }
 
     if (!avatar) {
@@ -303,7 +391,15 @@ void StackChanAvatarDisplay::SetupUI()
                 hal_bridge::toggle_xiaozhi_chat_state();
             }
         },
-        LV_EVENT_CLICKED, nullptr);
+        LV_EVENT_SHORT_CLICKED, nullptr);
+
+    // A long press switches skins; it must not also toggle the chat session.
+    lv_obj_add_event_cb(click_panel, [](lv_event_t* event) {
+        auto* display = static_cast<StackChanAvatarDisplay*>(lv_event_get_user_data(event));
+        Application::GetInstance().Schedule([display]() {
+            display->SetAvatarSkin(!WhiteEyesSelected());
+        });
+    }, LV_EVENT_LONG_PRESSED, this);
 
     stackchan.attachAvatar(std::move(avatar));
     stackchan.addModifier(std::make_unique<HeadPetModifier>());

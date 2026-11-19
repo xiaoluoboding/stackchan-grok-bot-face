@@ -1,4 +1,4 @@
-"""Forward Grok Bot voice tasks to Codex and read results in the device voice."""
+"""Forward Grok Bot voice tasks to local agents and speak results on the device."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ import serial
 from flomo_notes import run_notes
 from futu_query import run_query
 from progress import ProgressReporter
-from session import CodexSession
 from hermes_session import HermesSession
 from thetapilot import run_analysis
 from websearch import run_search
@@ -114,9 +113,12 @@ async def handle_task(
 
         reporter = ProgressReporter(send_progress)
         try:
-            if runner is None:
+            if runner is None and tool == "codex":
+                summary = "Codex 接入已停用，请使用 Hermes。"
+            elif runner is None:
                 raise RuntimeError(f"{name} runner is unavailable")
-            summary = await runner(task["text"], on_progress=reporter.offer)
+            else:
+                summary = await runner(task["text"], on_progress=reporter.offer)
             logger.info("%s task completed summary=%r", name, summary)
         except TimeoutError:
             summary = ("Hermes 等待超时，任务可能仍在后台执行，请在电脑上的 Hermes 中检查。"
@@ -162,12 +164,33 @@ async def handle_task(
             result_acks.pop(task["id"], None)
 
 
-async def serve(port: str, project: Path) -> None:
-    session = CodexSession(project)
+async def sync_local_jobs(device, lock, jobs, interval=5):
+    """Reconcile owned jobs without resubmitting any agent work."""
+    await asyncio.sleep(2)  # Drain queued USB task events before the first inventory.
+    while True:
+        packet = ("\nSTACKCHAN_AGENT_SYNC " + json.dumps({"jobs": sorted(jobs)}) + "\n").encode()
+        await write_packet(device, packet, lock)
+        await asyncio.sleep(interval)
+
+
+async def serve(port: str, project: Path, *, enable_codex: bool = False) -> None:
+    session = None
+    if enable_codex:
+        # Hermes-only startup must not import the optional Codex SDK.
+        from session import CodexSession
+        session = CodexSession(project)
     hermes = HermesSession(project)
     loop = asyncio.get_running_loop()
     tasks: asyncio.Queue[dict | None] = asyncio.Queue()
     result_acks: dict[int, asyncio.Event] = {}
+    owned_jobs: set[int] = set()
+
+    def enqueue(task):
+        if task["tool"] in {"codex", "hermes"}:
+            if task["id"] in owned_jobs:
+                return
+            owned_jobs.add(task["id"])
+        tasks.put_nowait(task)
 
     def acknowledge(job_id: int) -> None:
         if receipt := result_acks.get(job_id):
@@ -196,16 +219,25 @@ async def serve(port: str, project: Path) -> None:
                     if match:
                         loop.call_soon_threadsafe(acknowledge, int(match.group(1)))
                     if task := parse_task_event(line):
-                        loop.call_soon_threadsafe(tasks.put_nowait, task)
+                        loop.call_soon_threadsafe(enqueue, task)
             except serial.SerialException:
                 logger.exception("Device serial connection failed")
                 loop.call_soon_threadsafe(tasks.put_nowait, None)
 
         reader = threading.Thread(target=read_device, daemon=True)
         reader.start()
-        logger.info("USB connected; warming Codex port=%s project=%s", port, project)
+        logger.info("USB connected; Hermes enabled; Codex %s port=%s project=%s",
+                    "enabled" if session else "disabled", port, project)
         write_lock = asyncio.Lock()
         active = set()
+        async def reconcile():
+            try:
+                await sync_local_jobs(device, write_lock, owned_jobs)
+            except serial.SerialException:
+                logger.exception("USB task reconciliation failed")
+                tasks.put_nowait(None)
+
+        sync_job = asyncio.create_task(reconcile())
 
         async def warmup():
             try:
@@ -214,23 +246,27 @@ async def serve(port: str, project: Path) -> None:
             except Exception:
                 logger.exception("Codex warmup failed")
 
-        warmup_job = asyncio.create_task(warmup())
+        warmup_job = asyncio.create_task(warmup()) if session else None
         try:
             while task := await tasks.get():
                 job = asyncio.create_task(handle_task(
-                    task, device, write_lock, session.run, result_acks, hermes.run,
+                    task, device, write_lock, session.run if session else None, result_acks, hermes.run,
                 ))
                 active.add(job)
                 job.add_done_callback(active.discard)
+                if task["tool"] in {"codex", "hermes"}:
+                    job.add_done_callback(lambda _, job_id=task["id"]: owned_jobs.discard(job_id))
         finally:
             stopped.set()
-            warmup_job.cancel()
-            jobs = list(active) + [warmup_job]
+            jobs = list(active) + [sync_job]
+            if warmup_job is not None:
+                jobs.append(warmup_job)
             for job in jobs:
                 job.cancel()
             await asyncio.gather(*jobs, return_exceptions=True)
             await asyncio.to_thread(reader.join, 2)
-            await session.close()
+            if session is not None:
+                await session.close()
             await hermes.close()
 
 
@@ -238,11 +274,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", default="/dev/cu.usbmodem1101")
     parser.add_argument("--project", type=Path, required=True)
+    parser.add_argument("--enable-codex", action="store_true",
+                        help="Enable the optional Codex agent and startup warmup (default: disabled)")
     args = parser.parse_args()
     if not args.project.is_dir():
         parser.error("--project must be an existing directory")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    asyncio.run(serve(args.port, args.project))
+    asyncio.run(serve(args.port, args.project, enable_codex=args.enable_codex))
 
 
 if __name__ == "__main__":

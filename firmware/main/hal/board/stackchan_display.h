@@ -50,6 +50,10 @@ public:
     virtual void ShowNotification(const char* notification, int duration_ms = 3000) override;
     virtual void SetAnimationSuspended(bool suspended) override;
 
+    void ShowWakeShy();
+    bool SetAvatarSkin(bool white_eyes);
+    static bool WhiteEyesSelected();
+
     void LvglLock();
     void LvglUnlock();
     lv_disp_t* GetLvglDisplay();
