@@ -51,6 +51,23 @@ void wait_for_lcd_transfer(lv_display_t* display)
 extern const uint8_t white_eyes_atlas_start[] asm("_binary_white_eyes_atlas_start");
 extern const uint8_t white_eyes_atlas_end[] asm("_binary_white_eyes_atlas_end");
 
+void StackChanAvatarDisplay::SetSearching(bool active)
+{
+    DisplayLockGuard lock(this);
+    auto& stackchan = GetStackChan();
+    if (!stackchan.hasAvatar()) return;
+    if (auto* avatar = dynamic_cast<GrokBotAvatar*>(&stackchan.avatar())) avatar->setSearching(active);
+}
+
+bool StackChanAvatarDisplay::ShowAgentState(int state, uint32_t duration_ms)
+{
+    DisplayLockGuard lock(this);
+    auto& stackchan = GetStackChan();
+    if (!stackchan.hasAvatar()) return false;
+    auto* avatar = dynamic_cast<GrokBotAvatar*>(&stackchan.avatar());
+    return avatar && avatar->showAgentState(state, duration_ms);
+}
+
 void StackChanAvatarDisplay::ShowWakeShy()
 {
     DisplayLockGuard lock(this);

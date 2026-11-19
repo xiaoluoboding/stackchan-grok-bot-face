@@ -94,7 +94,13 @@ def test_large_chinese_results_fit_usb_preserving_source_urls():
 
 
 def test_device_event_runs_firecrawl_and_returns_correlated_packet_without_codex(monkeypatch):
+    markers = []
+
+    async def set_searching(job_id, active):
+        markers.append((job_id, active))
+
     async def search(arguments):
+        assert markers == [(42, True)]
         assert arguments == {"query": "SideCopilot 是什么", "limit": 3}
         return {"ok": True, "source": "firecrawl", "summary": "找到一条结果。",
                 "results": [{"url": "https://www.sidecopilot.com/", "snippet": "AI 侧边栏"}]}
@@ -114,7 +120,8 @@ def test_device_event_runs_firecrawl_and_returns_correlated_packet_without_codex
         "id": 42, "arguments": {"query": "SideCopilot 是什么", "limit": 3},
     }))
     device = Device()
-    asyncio.run(bridge.handle_task(task, device, asyncio.Lock(), None))
+    asyncio.run(bridge.handle_task(task, device, asyncio.Lock(), None, set_searching=set_searching))
+    assert markers == [(42, True), (42, False)]
     prefix, payload = device.packet.decode().strip().split(" ", 1)
     assert prefix == "STACKCHAN_WEBSEARCH_RESULT"
     result = json.loads(payload)

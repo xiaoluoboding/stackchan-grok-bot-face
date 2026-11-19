@@ -46,6 +46,8 @@ public:
     void setEmotion(const Emotion& emotion) override;
 
     void showWakeShy();
+    void setSearching(bool active);
+    bool showAgentState(int state, uint32_t duration_ms = 4000);
     void setMode(Mode mode);
     void setIdle()
     {
@@ -101,13 +103,16 @@ public:
     }
 
 private:
+    int agentStateForMode() const;
+    int activeAgentState() const;
+    void startAgentState(int state, int64_t now);
     void setPalette(bool transparent_eyes);
     bool decode_frame(const GrokBotPlayer::FrameInfo& frame);
     bool decode_backward_frame(const GrokBotPlayer::FrameInfo& frame);
     bool rebuild_to_current();
     bool render_current_frame();
     bool render_backward_frame();
-    void invalidate_image();
+    void invalidate_image(const AlphaBounds* bounds = nullptr);
 
     bool select_clip(const char* name);
     void play_next_clip();
@@ -129,6 +134,12 @@ private:
     AlphaBounds previous_eyes_bounds_;
     bool transparent_eyes_ = false;
     bool full_redraw_pending_ = true;
+
+    int agent_state_ = -1;
+    int64_t agent_started_us_ = 0;
+    int64_t agent_until_us_ = 0;
+    int64_t search_started_us_ = 0;
+    int64_t search_until_us_ = 0;
 
     int wake_shy_decorator_id_ = -1;
     int64_t wake_shy_until_us_ = 0;

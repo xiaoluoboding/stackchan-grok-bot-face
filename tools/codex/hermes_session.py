@@ -10,6 +10,10 @@ import signal
 from pathlib import Path
 
 logger = logging.getLogger("hermes-voice")
+WEB_RETRIEVAL_TOOLS = {
+    "mcp__firecrawl__firecrawl_search", "mcp__firecrawl__firecrawl_scrape",
+    "web_search", "web_extract",
+}
 VOICE_PROMPT = (
     "用户通过桌面机器人语音下达任务。请执行下面的用户请求，最后用自然中文纯文本简短回答，"
     "一般一句，复杂任务最多三句。失败或部分完成须明确说明。遵守项目指令，保留已有改动。"
@@ -31,7 +35,7 @@ class HermesSession:
         self._lock = asyncio.Lock()
         self._process = None
 
-    async def run(self, text: str, on_progress=None) -> str:
+    async def run(self, text: str, on_progress=None, *, on_search=None) -> str:
         timeout = int(os.getenv("STACKCHAN_HERMES_TIMEOUT_S", "600"))
         if timeout <= 0:
             raise ValueError("STACKCHAN_HERMES_TIMEOUT_S must be positive")
@@ -55,6 +59,7 @@ class HermesSession:
                     await process.stdin.drain()
                     process.stdin.close()
                     final = None
+                    searches = set()
                     async for line in process.stdout:
                         try:
                             event = json.loads(line)
@@ -66,8 +71,20 @@ class HermesSession:
                             session_id = event.get("session_id")
                             if isinstance(session_id, str) and session_id:
                                 self._session_id = session_id
-                        if event.get("type") == "tool_use" and on_progress:
-                            name = event.get("name", "")
+                        kind = event.get("type")
+                        name = event.get("name")
+                        if on_search and isinstance(name, str) and name in WEB_RETRIEVAL_TOOLS:
+                            key = event.get("tool_call_id") or name
+                            if isinstance(key, str):
+                                was_searching = bool(searches)
+                                if kind == "tool_use":
+                                    searches.add(key)
+                                elif kind == "tool_result":
+                                    searches.discard(key)
+                                if was_searching != bool(searches):
+                                    await on_search(bool(searches))
+                        if kind == "tool_use" and on_progress:
+                            name = name if isinstance(name, str) else ""
                             logger.info("Hermes tool started name=%s", name)
                             label = ("正在通过 Firecrawl 搜索资料。" if "firecrawl_search" in name else
                                      "正在通过 Firecrawl 核对网页正文。" if "firecrawl_scrape" in name else

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "grokbot_avatar.h"
+#include "grok_ball_motion.h"
 #include "../decorators/decorators.h"
 
 #include <esp_heap_caps.h>
@@ -171,6 +172,8 @@ bool GrokBotAvatar::setAtlas(const uint8_t* atlas, size_t atlas_size, bool trans
     lv_image_cache_drop(&image_dsc_);
     player_ = candidate;
     setPalette(transparent_eyes);
+    agent_until_us_ = 0;
+    startAgentState(agentStateForMode(), esp_timer_get_time());
     memset(packed_, 0, player_.packed_frame_size());
     lv_obj_set_style_bg_opa(panel_, transparent_eyes ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
     playback_fps_ = (mode_ == Mode::Listening || mode_ == Mode::Speaking) ? 12 : player_.fps();
@@ -224,7 +227,7 @@ void GrokBotAvatar::update()
         // Decode one pending skin frame on the normal LVGL update task,
         // even while TLS pauses playback. Decompression has a substantial
         // stack footprint and must not run in the app's NVS switch callback.
-        if (rebuild_pending_) rebuild_to_current();
+        if (rebuild_pending_ && full_redraw_pending_) rebuild_to_current();
         return;
     }
 
@@ -239,7 +242,27 @@ void GrokBotAvatar::update()
     const int64_t decode_start = now;
     bool rendered              = false;
 
-    if (rebuild_pending_) {
+    if (agent_until_us_ != 0 && now >= agent_until_us_) {
+        agent_until_us_ = 0;
+        startAgentState(agentStateForMode(), now);
+        choose_clip_for_mode();
+    }
+    if (search_until_us_ != 0 && now >= search_until_us_) {
+        search_until_us_ = 0;
+        if (agent_state_ < 0) choose_clip_for_mode();
+    }
+    const int state = activeAgentState();
+    if (state >= 0) {
+        const bool voice_active = mode_ == Mode::Speaking || mode_ == Mode::Listening;
+        const auto started = search_until_us_ > now ? search_started_us_ : agent_started_us_;
+        const auto bounds = grok_ball::render(state, (now - started) / 1000,
+                                              packed_, player_.width(), player_.height(), voice_active);
+        rendered = bounds.valid();
+        if (rendered) {
+            invalidate_image(&bounds);
+            rebuild_pending_ = true;
+        }
+    } else if (rebuild_pending_) {
         rendered = rebuild_to_current();
     } else if (!reverse_) {
         rendered = render_current_frame();
@@ -271,6 +294,58 @@ void GrokBotAvatar::update()
     if (now >= next_log_us_) {
         log_frame_stats(now);
     }
+}
+
+int GrokBotAvatar::agentStateForMode() const
+{
+    if (!transparent_eyes_) return -1;
+    switch (mode_) {
+        case Mode::Listening: return 35;
+        case Mode::Speaking: return grok_ball::kReplyState;
+        case Mode::Working: return 32;
+        case Mode::Loading: return 36;
+        case Mode::Celebrating: return 33;
+        case Mode::Error: return 34;
+        default: return -1;
+    }
+}
+
+int GrokBotAvatar::activeAgentState() const
+{
+    if (!transparent_eyes_ || wake_shy_until_us_ != 0) return -1;
+    return search_until_us_ > esp_timer_get_time() ? grok_ball::kSearchState : agent_state_;
+}
+
+void GrokBotAvatar::startAgentState(int state, int64_t now)
+{
+    agent_state_ = state;
+    agent_started_us_ = now;
+}
+
+void GrokBotAvatar::setSearching(bool active)
+{
+    const int64_t now = esp_timer_get_time();
+    const bool was_active = search_until_us_ > now;
+    // Refreshed by the bridge heartbeat. Clear automatically on disconnect.
+    search_until_us_ = active ? now + 15000000 : 0;
+    if (was_active == active) return;
+    if (active) {
+        search_started_us_ = now;
+    } else if (agent_state_ < 0 && wake_shy_until_us_ == 0) {
+        choose_clip_for_mode();
+    }
+    next_frame_us_ = now;
+    ESP_LOGI(TAG, "Web search eyes %s", active ? "started" : "stopped");
+}
+
+bool GrokBotAvatar::showAgentState(int state, uint32_t duration_ms)
+{
+    if (!ready_ || !transparent_eyes_ || !grok_ball::valid_state(state)) return false;
+    const int64_t now = esp_timer_get_time();
+    startAgentState(state, now);
+    agent_until_us_ = now + static_cast<int64_t>(duration_ms) * 1000;
+    next_frame_us_ = now;
+    return true;
 }
 
 void GrokBotAvatar::showWakeShy()
@@ -305,6 +380,9 @@ void GrokBotAvatar::setMode(Mode mode)
         return;
     }
     mode_             = mode;
+    if (agent_until_us_ == 0) {
+        startAgentState(agentStateForMode(), esp_timer_get_time());
+    }
     emotion_override_ = false;
     // Direct PSRAM LCD DMA competes with audio processing for memory bandwidth.
     // Cap voice states so the microphone and playback keep their deadlines.
@@ -434,7 +512,7 @@ bool GrokBotAvatar::render_backward_frame()
     return true;
 }
 
-void GrokBotAvatar::invalidate_image()
+void GrokBotAvatar::invalidate_image(const AlphaBounds* bounds)
 {
     if (image_ == nullptr) return;
     lv_image_cache_drop(&image_dsc_);
@@ -442,7 +520,7 @@ void GrokBotAvatar::invalidate_image()
         lv_obj_invalidate(image_);
         return;
     }
-    const auto current = packed_alpha_bounds(packed_, player_.width(), player_.height());
+    const auto current = bounds ? *bounds : packed_alpha_bounds(packed_, player_.width(), player_.height());
     if (full_redraw_pending_) {
         // In particular, erase the old opaque head when switching skins.
         lv_obj_invalidate(image_);
@@ -572,8 +650,8 @@ void GrokBotAvatar::log_frame_stats(int64_t now_us)
 {
     const uint32_t frames       = frames_since_log_;
     const int64_t avg_decode_us = frames ? decode_us_since_log_ / frames : 0;
-    ESP_LOGI(TAG, "fps=%lu clip=%s frame=%d/%d decode=%luus", static_cast<unsigned long>(frames), currentClipName(),
-             player_.current_index(), player_.selected_frame_count(), static_cast<unsigned long>(avg_decode_us));
+    ESP_LOGI(TAG, "fps=%lu clip=%s frame=%d/%d decode=%luus agent=%d", static_cast<unsigned long>(frames), currentClipName(),
+             player_.current_index(), player_.selected_frame_count(), static_cast<unsigned long>(avg_decode_us), activeAgentState());
     frames_since_log_    = 0;
     decode_us_since_log_ = 0;
     next_log_us_         = now_us + 1000000;

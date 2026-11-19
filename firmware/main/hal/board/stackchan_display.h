@@ -51,6 +51,8 @@ public:
     virtual void SetAnimationSuspended(bool suspended) override;
 
     void ShowWakeShy();
+    void SetSearching(bool active);
+    bool ShowAgentState(int state, uint32_t duration_ms = 4000);
     bool SetAvatarSkin(bool white_eyes);
     static bool WhiteEyesSelected();
 

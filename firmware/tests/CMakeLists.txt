@@ -21,3 +21,11 @@ add_executable(avatar_dirty_bounds_test avatar_dirty_bounds_test.cpp)
 target_include_directories(avatar_dirty_bounds_test PRIVATE ../main)
 target_compile_features(avatar_dirty_bounds_test PRIVATE cxx_std_17)
 add_test(NAME avatar_dirty_bounds_test COMMAND $<TARGET_FILE:avatar_dirty_bounds_test>)
+
+add_executable(grok_ball_motion_test
+    grok_ball_motion_test.cpp
+    ../main/stackchan/avatar/grokbot/grok_ball_motion.cpp
+)
+target_include_directories(grok_ball_motion_test PRIVATE ../main)
+target_compile_features(grok_ball_motion_test PRIVATE cxx_std_17)
+add_test(NAME grok_ball_motion_test COMMAND $<TARGET_FILE:grok_ball_motion_test>)

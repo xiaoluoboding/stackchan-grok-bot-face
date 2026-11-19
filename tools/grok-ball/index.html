@@ -1,0 +1,49 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>StackChan · 代理眼神</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#171918;color:#eeeae2;font-family:'Avenir Next','PingFang SC',sans-serif}main{max-width:1120px;margin:auto;padding:36px 28px}header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #42483c;padding-bottom:16px}small{font:11px ui-monospace,monospace;letter-spacing:.1em;color:#b4c99b}h1{font-size:32px;font-weight:500;margin-bottom:8px}p{font-size:13px;color:#b1b8a9;line-height:1.8}button{font:inherit;cursor:pointer;color:#d7dfcd;background:#22281f;border:1px solid #454f3d;border-radius:5px;padding:10px 16px}button[aria-pressed=true]{border-color:#c9e799;background:#28351d}#grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:24px 0}.card{text-align:left;padding:12px}.face{background:#000;aspect-ratio:1;display:grid;place-items:center}.face svg{width:100%;height:100%}.name{display:flex;justify-content:space-between;margin-top:12px;font-size:14px}.actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap}footer{border-top:1px solid #42483c;padding-top:18px;color:#929c88;font-size:11px}a{color:#c9e799}@media(max-width:650px){#grid{grid-template-columns:repeat(2,1fr)}main{padding:24px 16px}}
+</style>
+<main><header><small>STACKCHAN / GROK BALL</small><small>30—41 · AGENT STATES</small></header><h1>每一步，都有眼神回应。</h1><p>按截图顺序逐个加入的 10 个工作状态。透明背景、白色眼睛，保留当前头像的显示方式。固件从这里使用的平滑轮廓取样，并在屏幕上绘制半透明边缘。</p><div class="actions"><button id="tour">按顺序逐个演示</button><button id="pause">暂停动画</button><span id="status" role="status">30 · 思考中</span></div><section id="grid"></section><footer>来源：<a href="https://github.com/TyCoding/grok-ball">TyCoding/grok-ball</a>（MIT）。只复用眼形与动作；圆形身体、红色底色、彩带未导入。设备在已有语音状态切换时自动使用对应眼神；复述回忆、拒绝/受限和停止等语义状态由显式状态接口触发。</footer></main>
+<script type="module">
+const states=await fetch('./states-preview.json').then(r=>r.json());
+const NS='http://www.w3.org/2000/svg';let paused=false, selected=30,tour=false,tourStart=0,time=0,last=performance.now();
+const views=[];
+for(const state of states){
+ const card=document.createElement('button');card.className='card';card.dataset.state=state.id;card.setAttribute('aria-pressed',state.id===selected);
+ const face=document.createElement('div');face.className='face';const svg=document.createElementNS(NS,'svg');svg.setAttribute('viewBox','0 0 200 200');svg.setAttribute('aria-label',state.name);
+ const paths=[0,1].map(()=>{const p=document.createElementNS(NS,'path');p.setAttribute('fill','#fff');svg.append(p);return p;});face.append(svg);card.append(face);
+ const name=document.createElement('div');name.className='name';name.textContent=state.name;const id=document.createElement('small');id.textContent=state.id;name.append(id);card.append(name);
+ card.onclick=()=>{selected=state.id;time=0;tour=false;select();};document.querySelector('#grid').append(card);views.push({state,paths});
+}
+function select(){document.querySelector('#status').textContent=selected+' · '+states.find(s=>s.id===selected).name;document.querySelectorAll('.card').forEach(c=>c.setAttribute('aria-pressed',Number(c.dataset.state)===selected));}
+document.querySelector('#tour').onclick=()=>{tour=!tour;tourStart=performance.now();selected=30;time=0;select();};
+document.querySelector('#pause').onclick=e=>{paused=!paused;e.target.textContent=paused?'继续动画':'暂停动画';};
+function tick(now){if(!paused)time+=now-last;last=now;
+ if(tour){const next=states[Math.floor((now-tourStart)/3000)%states.length].id;if(next!==selected){selected=next;time=0;select();}}
+ for(const {state:s,paths} of views){const f=s.loop?(time%s.period)*s.frames/s.period:Math.min(time*s.frames/s.period,s.frames-1),a=Math.floor(f),b=s.loop?(a+1)%s.frames:Math.min(a+1,s.frames-1),mix=f-a;
+ paths.forEach((path, eye) => {
+  const stride = s.points * 4;
+  const points = Array.from({length: s.points}, (_, index) => {
+   const offset = (eye * s.points + index) * 2;
+   return [0, 1].map(axis => {
+    const x = s.data[a * stride + offset + axis];
+    const y = s.data[b * stride + offset + axis];
+    return x + (y - x) * mix;
+   });
+  });
+  const at = index => points[(index + points.length) % points.length];
+  const smoothed = points.map((point, i) => point.map((v, axis) =>
+   (at(i - 1)[axis] + 2 * v + at(i + 1)[axis]) / 4));
+  const get = index => smoothed[(index + points.length) % points.length];
+  const xy = point => point.map(v => v.toFixed(3)).join(' ');
+  const segments = smoothed.map((p1, i) => {
+   const p0 = get(i - 1), p2 = get(i + 1), p3 = get(i + 2);
+   const first = p1.map((v, axis) => v + (p2[axis] - p0[axis]) / 6);
+   const second = p2.map((v, axis) => v - (p3[axis] - p1[axis]) / 6);
+   return 'C' + [first, second, p2].map(xy).join(' ');
+  });
+  path.setAttribute('d', 'M' + xy(smoothed[0]) + segments.join('') + 'Z');
+ });
+ }
+ requestAnimationFrame(tick);
+}requestAnimationFrame(tick);window.previewReady=true;
+</script></html>

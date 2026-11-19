@@ -61,9 +61,13 @@ async def write_packet(device, packet: bytes, lock: asyncio.Lock) -> None:
 async def handle_task(
     task: dict, device, lock: asyncio.Lock, run_codex_task,
     result_acks: dict[int, asyncio.Event] | None = None,
-    run_hermes_task=None,
+    run_hermes_task=None, set_searching=None,
 ) -> None:
     tool = task["tool"]
+    async def on_search(active: bool) -> None:
+        if set_searching is not None:
+            await set_searching(task["id"], active)
+
     if tool == "thetapilot":
         logger.info("ThetaPilot analysis started id=%s arguments=%r", task["id"], task["arguments"])
         result = await run_analysis(task["arguments"])
@@ -82,7 +86,11 @@ async def handle_task(
         prefix = "STACKCHAN_FLOMO_RESULT "
     elif tool == "websearch":
         logger.info("Web search started id=%s", task["id"])
-        result = await run_search(task["arguments"])
+        try:
+            await on_search(True)
+            result = await run_search(task["arguments"])
+        finally:
+            await on_search(False)
         logger.info("Web search completed id=%s result=%s", task["id"], result)
         result["id"] = task["id"]
         prefix = "STACKCHAN_WEBSEARCH_RESULT "
@@ -117,6 +125,8 @@ async def handle_task(
                 summary = "Codex 接入已停用，请使用 Hermes。"
             elif runner is None:
                 raise RuntimeError(f"{name} runner is unavailable")
+            elif tool == "hermes" and set_searching is not None:
+                summary = await runner(task["text"], on_progress=reporter.offer, on_search=on_search)
             else:
                 summary = await runner(task["text"], on_progress=reporter.offer)
             logger.info("%s task completed summary=%r", name, summary)
@@ -130,6 +140,8 @@ async def handle_task(
         finally:
             # Stop queued progress before sending the authoritative final result.
             await reporter.close()
+            if tool == "hermes":
+                await on_search(False)
         result = {"id": task["id"], "text": summary}
         prefix = "STACKCHAN_CODEX_RESULT "
     packet = (prefix + json.dumps(result, ensure_ascii=False) + "\n").encode()
@@ -164,11 +176,14 @@ async def handle_task(
             result_acks.pop(task["id"], None)
 
 
-async def sync_local_jobs(device, lock, jobs, interval=5):
+async def sync_local_jobs(device, lock, jobs, interval=5, *, search_jobs=None):
     """Reconcile owned jobs without resubmitting any agent work."""
     await asyncio.sleep(2)  # Drain queued USB task events before the first inventory.
     while True:
-        packet = ("\nSTACKCHAN_AGENT_SYNC " + json.dumps({"jobs": sorted(jobs)}) + "\n").encode()
+        payload = {"jobs": sorted(jobs)}
+        if search_jobs is not None:
+            payload["searching"] = bool(search_jobs)
+        packet = ("\nSTACKCHAN_AGENT_SYNC " + json.dumps(payload) + "\n").encode()
         await write_packet(device, packet, lock)
         await asyncio.sleep(interval)
 
@@ -184,6 +199,7 @@ async def serve(port: str, project: Path, *, enable_codex: bool = False) -> None
     tasks: asyncio.Queue[dict | None] = asyncio.Queue()
     result_acks: dict[int, asyncio.Event] = {}
     owned_jobs: set[int] = set()
+    search_jobs: set[int] = set()
 
     def enqueue(task):
         if task["tool"] in {"codex", "hermes"}:
@@ -230,9 +246,22 @@ async def serve(port: str, project: Path, *, enable_codex: bool = False) -> None
                     "enabled" if session else "disabled", port, project)
         write_lock = asyncio.Lock()
         active = set()
+        async def set_searching(job_id: int, searching: bool) -> None:
+            was_searching = bool(search_jobs)
+            if searching:
+                search_jobs.add(job_id)
+            else:
+                search_jobs.discard(job_id)
+            if bool(search_jobs) == was_searching:
+                return
+            try:
+                await write_packet(device, f"\nSTACKCHAN_SEARCH {int(searching)}\n".encode(), write_lock)
+            except serial.SerialException:
+                logger.warning("Could not update search eyes over USB")
+
         async def reconcile():
             try:
-                await sync_local_jobs(device, write_lock, owned_jobs)
+                await sync_local_jobs(device, write_lock, owned_jobs, search_jobs=search_jobs)
             except serial.SerialException:
                 logger.exception("USB task reconciliation failed")
                 tasks.put_nowait(None)
@@ -250,7 +279,7 @@ async def serve(port: str, project: Path, *, enable_codex: bool = False) -> None
         try:
             while task := await tasks.get():
                 job = asyncio.create_task(handle_task(
-                    task, device, write_lock, session.run if session else None, result_acks, hermes.run,
+                    task, device, write_lock, session.run if session else None, result_acks, hermes.run, set_searching,
                 ))
                 active.add(job)
                 job.add_done_callback(active.discard)

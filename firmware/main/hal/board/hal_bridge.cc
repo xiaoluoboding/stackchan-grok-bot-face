@@ -5,6 +5,7 @@
  */
 #include "hal_bridge.h"
 #include "stackchan_display.h"
+#include <stackchan/avatar/grokbot/grok_ball_motion.h>
 #include <esp_log.h>
 #include <esp_err.h>
 #include <esp_heap_caps.h>
@@ -34,6 +35,15 @@ void stackchan_wake_feedback()
         display->ShowWakeShy();
     }
 }
+
+#ifdef CONFIG_STACKCHAN_CODEX_VOICE_USB
+static void set_search_eyes(bool active)
+{
+    if (auto* display = dynamic_cast<StackChanAvatarDisplay*>(Board::GetInstance().GetDisplay())) {
+        display->SetSearching(active);
+    }
+}
+#endif
 
 static const char* _tag = "HAL_BRIDGE";
 
@@ -158,6 +168,8 @@ static void usb_speech_task(void*)
                     line.back() >= '1' && line.back() <= '9') {
                     usb_record(line.back() - '0');
 #ifdef CONFIG_STACKCHAN_CODEX_VOICE_USB
+                } else if (!overflow && (line == "STACKCHAN_SEARCH 1" || line == "STACKCHAN_SEARCH 0")) {
+                    Application::GetInstance().Schedule([active = line.back() == '1']() { set_search_eyes(active); });
                 } else if (!overflow && line.starts_with("STACKCHAN_AGENT_SYNC ")) {
                     auto* payload = cJSON_Parse(line.c_str() + strlen("STACKCHAN_AGENT_SYNC "));
                     auto* jobs = cJSON_GetObjectItem(payload, "jobs");
@@ -172,9 +184,14 @@ static void usb_speech_task(void*)
                             }
                             ids.push_back(job->valueint);
                         }
-                        if (valid) Application::GetInstance().Schedule([ids = std::move(ids)]() {
-                            Application::GetInstance().SyncLocalTasks(ids);
-                        });
+                        const auto* searching = cJSON_GetObjectItem(payload, "searching");
+                        const bool has_searching = cJSON_IsBool(searching);
+                        if (valid) Application::GetInstance().Schedule(
+                            [ids = std::move(ids), has_searching, active = cJSON_IsTrue(searching)]() {
+                                Application::GetInstance().SyncLocalTasks(ids);
+                                if (has_searching) set_search_eyes(active);
+                            });
+
                     }
                     cJSON_Delete(payload);
                 } else if (!overflow && line.starts_with("STACKCHAN_FLOMO_RESULT ")) {
@@ -257,6 +274,24 @@ static void usb_speech_task(void*)
                     }
                     cJSON_Delete(result);
 #endif
+                } else if (!overflow && line.starts_with("STACKCHAN_AGENT ")) {
+                    auto* packet = cJSON_Parse(line.c_str() + sizeof("STACKCHAN_AGENT ") - 1);
+                    const auto* state = cJSON_GetObjectItem(packet, "state");
+                    const auto* duration = cJSON_GetObjectItem(packet, "duration_ms");
+                    const int ms = duration && cJSON_IsNumber(duration) ? duration->valueint : 4000;
+                    if (cJSON_IsNumber(state) && state->valuedouble == state->valueint &&
+                        stackchan::avatar::grok_ball::valid_state(state->valueint) &&
+                        (!duration || (cJSON_IsNumber(duration) && duration->valuedouble == ms)) &&
+                        ms >= 250 && ms <= 600000) {
+                        Application::GetInstance().Schedule([id = state->valueint, ms]() {
+                            auto* display = dynamic_cast<StackChanAvatarDisplay*>(Board::GetInstance().GetDisplay());
+                            const bool ok = display && display->ShowAgentState(id, ms);
+                            ESP_LOGI(_tag, "Agent state command: %d %s", id, ok ? "OK" : "FAILED");
+                        });
+                    } else {
+                        ESP_LOGW(_tag, "Invalid agent state command");
+                    }
+                    cJSON_Delete(packet);
                 } else if (!overflow && line.starts_with("STACKCHAN_AVATAR ")) {
                     const auto selection = line.substr(strlen("STACKCHAN_AVATAR "));
                     if (selection == "white-eyes" || selection == "original") {

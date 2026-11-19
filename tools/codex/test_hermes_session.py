@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 from hermes_session import HermesSession
 
@@ -24,6 +24,12 @@ if "timeout-test" in prompt:
     time.sleep(20)
 print("non-JSON diagnostic")
 print(json.dumps({"type":"tool_use", "name":"terminal", "input":{"secret":"never speak"}}))
+if "search-test" in prompt:
+    search = "mcp__firecrawl__firecrawl_search"
+    scrape = "mcp__firecrawl__firecrawl_scrape"
+    for kind, tool, tool_id in [("tool_use", search, "a"), ("tool_use", scrape, "b"),
+                                ("tool_result", search, "a"), ("tool_result", scrape, "b")]:
+        print(json.dumps({"type":kind, "name":tool, "tool_call_id":tool_id}))
 sys.stderr.write("diagnostic" * 20000)
 if "missing-result" not in prompt:
     print(json.dumps({"type":"result", "session_id":"voice-session", "exit_code":0, "text":"已完成"}))
@@ -49,6 +55,11 @@ if "missing-result" not in prompt:
         self.assertNotIn("--resume", calls[0]["args"])
         self.assertEqual(calls[1]["args"][-2:], ["--resume", "voice-session"])
         progress.assert_awaited_once_with("Hermes 正在调用工具处理任务。", detailed=False)
+
+    async def test_search_indicator_covers_overlapping_searches_only(self):
+        searching = AsyncMock()
+        self.assertEqual(await self.session.run("search-test", on_search=searching), "已完成")
+        self.assertEqual(searching.await_args_list, [call(True), call(False)])
 
     async def test_missing_terminal_result_is_failure(self):
         with self.assertRaises(RuntimeError):

@@ -9,7 +9,12 @@ if(CONFIG_LIBC_NEWLIB_NANO_FORMAT)
         "Component config -> C standard library).")
 endif()
 
-file(GLOB_RECURSE STACK_CHAN_SOURCES
+# ESP-IDF also reads this list in script mode to collect dependencies.
+set(STACK_CHAN_GLOB_OPTIONS)
+if(NOT CMAKE_SCRIPT_MODE_FILE)
+    set(STACK_CHAN_GLOB_OPTIONS CONFIGURE_DEPENDS)
+endif()
+file(GLOB_RECURSE STACK_CHAN_SOURCES ${STACK_CHAN_GLOB_OPTIONS}
     "apps/*.c"
     "apps/*.cc"
     "apps/*.cpp"
