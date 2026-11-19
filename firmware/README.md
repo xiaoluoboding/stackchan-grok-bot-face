@@ -63,6 +63,39 @@ CHROME_BIN=/path/to/chrome SIZE=200 node tools/grokbot/bake.mjs
 已在一台 M5Stack StackChan 上确认：Wi-Fi 获取地址、MQTT/TLS 连接、语音服务激活、WakeNet 唤醒、正常对话，以及待机头部不再自动摆动。其他网络环境、服务端部署和全部上游应用功能尚需分别验证。
 
 
+## Hermes 语音模式
+
+设备通过 `self.hermes.execute({"task":"用户请求"})` 将任务交给 Mac 上已安装的
+Hermes Agent，随后用 `self.hermes.result({})` 查询进度和结果，完成后由小智用原音色播报。
+这是 USB 直连本地 Hermes 的执行链路；识别和语音合成仍使用原小智服务。
+
+刷入包含此功能的固件，启用下面 Codex 语音模式中的两个配置项，使用同一个
+`tools/codex/bridge.py` 启动命令即可。不要同时启动两个桥接进程占用同一串口。
+对机器人说「请让 Hermes 查看当前项目分支，完成后告诉我」。
+
+Mac 端调用 `hermes chat --format stream-json --query-file - --in 项目目录`，
+从 stdin 原样传递请求，使用本地 Hermes 的模型、登录配置和工具权限；不会附加 `--yolo`。
+每次请求结束后保存 Hermes 返回的 session ID，后续只恢复该会话，不使用 `latest`，
+避免接到其他终端会话。重启 bridge 后开始新会话，不会自动恢复此前任务。
+本机安装版本已验证支持此 JSONL 接口；较旧版本需先升级 Hermes。
+
+可设置 `STACKCHAN_HERMES_BIN` 指定可执行文件（默认从 PATH 找 `hermes`），
+`STACKCHAN_HERMES_TIMEOUT_S` 设置等待超时（默认 600 秒）。超时不会自动重试；
+Hermes gateway 已接收的任务可能继续执行，请在 Hermes 中核对。需要人工批准的
+操作仍遵循 Hermes 自身规则，语音 bridge 不代替用户批准。
+
+Hermes 和 Codex 共用设备上的一个任务槽；运行期间不启动另一项任务，结果中的
+`backend` 标明实际执行者。两者会话上下文独立。为了复用现有确认与重传机制，
+Hermes 结果和工具进度沿用 `STACKCHAN_CODEX_RESULT` / `STACKCHAN_CODEX_PROGRESS`
+USB 包，设备发任务时使用 `HermesVoice: TASK`，Mac 日志显示 `Hermes task started`。
+只转发通用工具执行提示和最终答案，不播报原始工具参数、工具输出或推理流。
+USB 语音固件把 MCP 工具列表按约 3500 字节分页，降低音频引擎运行时 TLS 发送的内存峰值。
+
+2026-11-18 已实机验证：通过 USB 注入简短文字「让 Hermes 说测试成功」，小智选择
+`self.hermes.execute`，Mac 本地 Hermes 返回「测试成功。」，设备经
+`self.hermes.result` 取得结果，日志确认 `Speech audio delivered to speaker`。
+另外已验证本地 Hermes 两轮会话可续接上下文；此轮实机测试未测试麦克风识别。
+
 ## Codex 语音模式
 
 Grok Bot 保持连接原小智语音服务，保留账号中配置的音色。设备向小智注册 `self.codex.execute` MCP 工具，工具调用通过 USB

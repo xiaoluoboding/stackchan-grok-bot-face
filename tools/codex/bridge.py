@@ -15,11 +15,13 @@ from flomo_notes import run_notes
 from futu_query import run_query
 from progress import ProgressReporter
 from session import CodexSession
+from hermes_session import HermesSession
 from thetapilot import run_analysis
 from websearch import run_search
 
 logger = logging.getLogger("codex-voice")
 TASK_MARKER = "CodexVoice: TASK "
+HERMES_MARKER = "HermesVoice: TASK "
 FUTU_MARKER = "FutuVoice: QUERY "
 WEBSEARCH_MARKER = "WebSearchVoice: QUERY "
 FLOMO_MARKER = "FlomoVoice: QUERY "
@@ -28,7 +30,7 @@ THETA_MARKER = "ThetaVoice: QUERY "
 
 def parse_task_event(line: str) -> dict | None:
     for marker, tool in ((THETA_MARKER, "thetapilot"), (FLOMO_MARKER, "flomo"), (WEBSEARCH_MARKER, "websearch"), (FUTU_MARKER, "futu"),
-                         (TASK_MARKER, "codex")):
+                         (HERMES_MARKER, "hermes"), (TASK_MARKER, "codex")):
         if marker not in line:
             continue
         try:
@@ -37,7 +39,7 @@ def parse_task_event(line: str) -> dict | None:
             return None
         if not isinstance(task, dict) or type(task.get("id")) is not int:
             return None
-        if tool == "codex":
+        if tool in {"codex", "hermes"}:
             if not isinstance(task.get("text"), str) or not task["text"].strip():
                 return None
         elif not isinstance(task.get("arguments"), dict):
@@ -60,6 +62,7 @@ async def write_packet(device, packet: bytes, lock: asyncio.Lock) -> None:
 async def handle_task(
     task: dict, device, lock: asyncio.Lock, run_codex_task,
     result_acks: dict[int, asyncio.Event] | None = None,
+    run_hermes_task=None,
 ) -> None:
     tool = task["tool"]
     if tool == "thetapilot":
@@ -95,7 +98,9 @@ async def handle_task(
         result["id"] = task["id"]
         prefix = "STACKCHAN_FUTU_RESULT "
     else:
-        logger.info("Codex task started id=%s text=%r", task["id"], task["text"])
+        name = "Hermes" if tool == "hermes" else "Codex"
+        runner = run_hermes_task if tool == "hermes" else run_codex_task
+        logger.info("%s task started id=%s", name, task["id"])
         sequence = 0
 
         async def send_progress(text):
@@ -109,14 +114,17 @@ async def handle_task(
 
         reporter = ProgressReporter(send_progress)
         try:
-            summary = await run_codex_task(task["text"], on_progress=reporter.offer)
-            logger.info("Codex task completed summary=%r", summary)
+            if runner is None:
+                raise RuntimeError(f"{name} runner is unavailable")
+            summary = await runner(task["text"], on_progress=reporter.offer)
+            logger.info("%s task completed summary=%r", name, summary)
         except TimeoutError:
-            summary = "Codex 任务超时，请检查项目中是否有部分改动。"
-            logger.warning("Codex task timed out")
+            summary = ("Hermes 等待超时，任务可能仍在后台执行，请在电脑上的 Hermes 中检查。"
+                       if tool == "hermes" else "Codex 任务超时，请检查项目中是否有部分改动。")
+            logger.warning("%s task timed out", name)
         except Exception:
-            summary = "Codex 任务未能完成，请查看电脑上的日志。"
-            logger.exception("Codex task failed")
+            summary = f"{name} 任务未能完成，请查看电脑上的日志。"
+            logger.exception("%s task failed", name)
         finally:
             # Stop queued progress before sending the authoritative final result.
             await reporter.close()
@@ -128,7 +136,7 @@ async def handle_task(
         result = {"id": task["id"], "ok": False,
                   "summary" if tool in {"futu", "websearch", "flomo"} else "text": "结果过长，请在电脑日志中查看。"}
         packet = (prefix + json.dumps(result, ensure_ascii=False) + "\n").encode()
-    receipt = asyncio.Event() if tool == "codex" and result_acks is not None else None
+    receipt = asyncio.Event() if tool in {"codex", "hermes"} and result_acks is not None else None
     if receipt is not None:
         result_acks[task["id"]] = receipt
     try:
@@ -156,6 +164,7 @@ async def handle_task(
 
 async def serve(port: str, project: Path) -> None:
     session = CodexSession(project)
+    hermes = HermesSession(project)
     loop = asyncio.get_running_loop()
     tasks: asyncio.Queue[dict | None] = asyncio.Queue()
     result_acks: dict[int, asyncio.Event] = {}
@@ -208,7 +217,9 @@ async def serve(port: str, project: Path) -> None:
         warmup_job = asyncio.create_task(warmup())
         try:
             while task := await tasks.get():
-                job = asyncio.create_task(handle_task(task, device, write_lock, session.run, result_acks))
+                job = asyncio.create_task(handle_task(
+                    task, device, write_lock, session.run, result_acks, hermes.run,
+                ))
                 active.add(job)
                 job.add_done_callback(active.discard)
         finally:
@@ -220,6 +231,7 @@ async def serve(port: str, project: Path) -> None:
             await asyncio.gather(*jobs, return_exceptions=True)
             await asyncio.to_thread(reader.join, 2)
             await session.close()
+            await hermes.close()
 
 
 def main() -> None:

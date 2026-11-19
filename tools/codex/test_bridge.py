@@ -3,7 +3,7 @@ import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from bridge import handle_task
+from bridge import handle_task, parse_task_event
 
 
 class Device:
@@ -33,6 +33,23 @@ class Device:
 
 
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hermes_routes_to_its_own_runner_and_confirms_result(self):
+        task = parse_task_event('I HermesVoice: TASK {"id":7,"text":"查看项目"}')
+        self.assertEqual(task["tool"], "hermes")
+        receipts = {}
+        device = Device(receipts)
+        codex = AsyncMock()
+        hermes = AsyncMock(return_value="Hermes 已完成")
+        await handle_task(task, device, asyncio.Lock(), codex, receipts, hermes)
+        codex.assert_not_awaited()
+        hermes.assert_awaited_once()
+        self.assertIn("Hermes", json.loads(device.packets[-1].split(b" ", 1)[1])["text"])
+        self.assertEqual(receipts, {})
+
+    def test_rejects_malformed_hermes_tasks(self):
+        for payload in ['[]', '{"id":true,"text":"x"}', '{"id":7,"text":" "}']:
+            self.assertIsNone(parse_task_event("HermesVoice: TASK " + payload))
+
     async def test_result_is_confirmed_without_reexecuting_codex(self):
         receipts = {}
         device = Device(receipts)
